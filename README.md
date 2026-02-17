@@ -30,6 +30,7 @@ Malware analysts frequently examine Windows PE files, but the most capable surfa
 | Hashes | MD5, SHA1, SHA256 of the entire file |
 | Overlay | Detection of data appended beyond the PE structure |
 | Suspicious API Indicators | Auto-tags ~130 Windows APIs across 12 risk categories (Process Injection, Code Execution, Network, Evasion, etc.) with severity levels (high/medium/low) |
+| Anomaly Detection | 18 heuristic rules detecting packing indicators, W^X violations, missing security features (ASLR/DEP/CFG), timestamp anomalies, structural irregularities, and suspicious API combos |
 | Output | Human-readable tables (default) or JSON (`--json`), file output (`-o`) |
 | GUI | egui-based GUI with tabbed views, drag & drop, filters, entropy color-coding, suspicious API highlighting (opt-in via `--features gui`) |
 
@@ -79,6 +80,8 @@ readpe <file.exe> --hashes     # File hashes only
 readpe <file.exe> --json       # JSON output
 readpe <file.exe> --json | jq '.suspicious_summary'              # Suspicious API summary
 readpe <file.exe> --json | jq '.imports[].functions[] | select(.risk != null)'  # Risky APIs only
+readpe <file.exe> --json | jq '.anomalies'                      # All anomalies
+readpe <file.exe> --json | jq '.anomalies[] | select(.severity == "critical")'  # Critical anomalies only
 readpe <file.exe> -o report.txt  # Write to file
 ```
 
@@ -150,11 +153,25 @@ The GUI provides:
   Code Execution               2
   Network                      2
   ...
+
+=== Anomaly Detection ===
+  CRITICAL: 2 WARNING: 5 INFO: 3
+
+  [CRITICAL] Code Integrity: Section '.xpack' is both writable and executable (W^X violation)
+  [CRITICAL] Suspicious Combo: Process Injection + Evasion APIs both present — possible code injection technique
+  [WARNING] Packing: Executable section '.text' has high entropy (6.8921)
+  [WARNING] Security: ASLR (DYNAMIC_BASE) is disabled
+  [WARNING] Security: DEP (NX_COMPAT) is disabled
+  [WARNING] Timestamp: Timestamp (1998-03-15 00:00:00 UTC) is before year 2000 — possible forgery
+  [WARNING] Structure: Overlay data detected (4096 bytes at offset 0x12000)
+  [INFO] Security: Control Flow Guard (GUARD_CF) is not enabled
+  [INFO] Structure: Non-standard section name '.xpack'
+  ...
 ```
 
 ## Roadmap
 
-- **v0.2**: Resource directory, Rich header, TLS/Debug directories, anomaly detection
+- **v0.2**: Resource directory, Rich header, TLS/Debug directories
 - **v0.3**: .NET metadata, Authenticode signatures, packer detection, entropy histogram
 - **Future**: ELF format support
 

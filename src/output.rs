@@ -155,6 +155,31 @@ pub fn format_text(result: &AnalysisResult) -> String {
         }
     }
 
+    if let Some(ref anomalies) = result.anomalies {
+        if !anomalies.is_empty() {
+            out.push_str("=== Anomaly Detection ===\n");
+            let critical = anomalies.iter().filter(|a| a.severity == "critical").count();
+            let warning = anomalies.iter().filter(|a| a.severity == "warning").count();
+            let info_count = anomalies.iter().filter(|a| a.severity == "info").count();
+            out.push_str(&format!("  {} {} {}\n",
+                format!("CRITICAL: {}", critical).red().bold(),
+                format!("WARNING: {}", warning).yellow(),
+                format!("INFO: {}", info_count).cyan(),
+            ));
+            out.push('\n');
+            for anomaly in anomalies {
+                let tag = match anomaly.severity.as_str() {
+                    "critical" => format!("{}", "[CRITICAL]".red().bold()),
+                    "warning" => format!("{}", "[WARNING]".yellow()),
+                    "info" => format!("{}", "[INFO]".cyan()),
+                    _ => String::new(),
+                };
+                out.push_str(&format!("  {} {}: {}\n", tag, anomaly.category, anomaly.description));
+            }
+            out.push('\n');
+        }
+    }
+
     if let Some(ref exports) = result.exports {
         if !exports.is_empty() {
             out.push_str(&format!("=== Exports ({}) ===\n", exports.len()));

@@ -82,6 +82,57 @@ pub fn show(ui: &mut Ui, result: &AnalysisResult) {
                 });
         }
     }
+
+    if let Some(ref anomalies) = result.anomalies {
+        if !anomalies.is_empty() {
+            ui.add_space(16.0);
+            ui.colored_label(RISK_HIGH, egui::RichText::new("ANOMALY DETECTION").size(14.0));
+            ui.add_space(6.0);
+
+            let critical = anomalies.iter().filter(|a| a.severity == "critical").count();
+            let warning = anomalies.iter().filter(|a| a.severity == "warning").count();
+            let info_count = anomalies.iter().filter(|a| a.severity == "info").count();
+
+            ui.horizontal(|ui| {
+                severity_badge(ui, "CRIT", critical, RISK_HIGH);
+                severity_badge(ui, "WARN", warning, RISK_MEDIUM);
+                severity_badge(ui, "INFO", info_count, RISK_LOW);
+                ui.colored_label(LABEL, format!("({} total)", anomalies.len()));
+            });
+            ui.add_space(8.0);
+
+            egui::Frame::new()
+                .fill(BG_DARK)
+                .corner_radius(egui::CornerRadius::same(4))
+                .stroke(egui::Stroke::new(0.5, BORDER))
+                .inner_margin(egui::Margin::same(8))
+                .show(ui, |ui| {
+                    egui::Grid::new("anomaly_grid")
+                        .num_columns(3)
+                        .spacing([12.0, 4.0])
+                        .show(ui, |ui| {
+                            for anomaly in anomalies {
+                                let severity_color = match anomaly.severity.as_str() {
+                                    "critical" => RISK_HIGH,
+                                    "warning" => RISK_MEDIUM,
+                                    "info" => RISK_LOW,
+                                    _ => LABEL,
+                                };
+                                let badge = match anomaly.severity.as_str() {
+                                    "critical" => "CRIT",
+                                    "warning" => "WARN",
+                                    "info" => "INFO",
+                                    _ => "???",
+                                };
+                                ui.colored_label(severity_color, egui::RichText::new(badge).strong());
+                                ui.colored_label(ACCENT_DIM, &anomaly.category);
+                                ui.colored_label(Color32::from_rgb(200, 200, 210), &anomaly.description);
+                                ui.end_row();
+                            }
+                        });
+                });
+        }
+    }
 }
 
 fn severity_badge(ui: &mut Ui, label: &str, count: usize, color: Color32) {

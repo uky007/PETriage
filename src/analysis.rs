@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::time::SystemTime;
 
 use goblin::pe::PE;
 use md5::Digest;
@@ -44,6 +45,8 @@ pub struct AnalysisResult {
     pub overlay: Option<OverlayInfo>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub suspicious_summary: Option<SuspiciousSummary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub anomalies: Option<Vec<Anomaly>>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -149,6 +152,13 @@ pub struct CategoryCount {
 }
 
 #[derive(Clone, Debug, Serialize)]
+pub struct Anomaly {
+    pub category: String,
+    pub severity: String,
+    pub description: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
 pub struct ExportEntry {
     pub name: String,
     pub ordinal: usize,
@@ -241,6 +251,10 @@ pub fn analyze(data: &[u8], pe: &PE, opts: &AnalysisOptions) -> AnalysisResult {
 
     let suspicious_summary = imports.as_ref().map(|imp| build_suspicious_summary(imp));
 
+    let anomalies = Some(detect_anomalies(
+        &sections, &coff_header, &optional_header, &overlay, &suspicious_summary,
+    ));
+
     AnalysisResult {
         file_info,
         dos_header,
@@ -253,7 +267,258 @@ pub fn analyze(data: &[u8], pe: &PE, opts: &AnalysisOptions) -> AnalysisResult {
         hashes,
         overlay,
         suspicious_summary,
+        anomalies,
     }
+}
+
+fn detect_anomalies(
+    sections: &Option<Vec<SectionInfo>>,
+    coff_header: &Option<CoffHeader>,
+    optional_header: &Option<OptionalHeader>,
+    overlay: &Option<OverlayInfo>,
+    suspicious_summary: &Option<SuspiciousSummary>,
+) -> Vec<Anomaly> {
+    let mut anomalies = Vec::new();
+
+    let standard_names: &[&str] = &[
+        ".text", ".data", ".rdata", ".rsrc", ".reloc",
+        ".bss", ".idata", ".edata", ".tls", ".pdata",
+    ];
+
+    // Section-based rules
+    if let Some(sections) = sections {
+        for sec in sections {
+            // Rule 1: Entropy > 7.0 — likely encrypted or packed
+            if sec.entropy > 7.0 {
+                anomalies.push(Anomaly {
+                    category: "Packing".into(),
+                    severity: "critical".into(),
+                    description: format!(
+                        "Section '{}' has very high entropy ({:.4}) — likely encrypted or packed",
+                        sec.name, sec.entropy
+                    ),
+                });
+            }
+            // Rule 2: Entropy > 6.5 and executable
+            else if sec.entropy > 6.5 && sec.characteristics & 0x20000000 != 0 {
+                anomalies.push(Anomaly {
+                    category: "Packing".into(),
+                    severity: "warning".into(),
+                    description: format!(
+                        "Executable section '{}' has high entropy ({:.4})",
+                        sec.name, sec.entropy
+                    ),
+                });
+            }
+
+            // Rule 3: raw_size=0, virtual_size > 0
+            if sec.raw_size == 0 && sec.virtual_size > 0 {
+                anomalies.push(Anomaly {
+                    category: "Packing".into(),
+                    severity: "warning".into(),
+                    description: format!(
+                        "Section '{}' has raw_size=0 but virtual_size={:#x} — runtime unpacking suspected",
+                        sec.name, sec.virtual_size
+                    ),
+                });
+            }
+
+            // Rule 4: virtual_size > 10 * raw_size
+            if sec.raw_size > 0 && sec.virtual_size > sec.raw_size * 10 {
+                anomalies.push(Anomaly {
+                    category: "Packing".into(),
+                    severity: "warning".into(),
+                    description: format!(
+                        "Section '{}' has abnormal expansion ratio (virtual={:#x}, raw={:#x}, ratio={:.1}x)",
+                        sec.name, sec.virtual_size, sec.raw_size,
+                        sec.virtual_size as f64 / sec.raw_size as f64
+                    ),
+                });
+            }
+
+            // Rule 5: W^X violation (Write + Execute)
+            if sec.characteristics & 0x80000000 != 0 && sec.characteristics & 0x20000000 != 0 {
+                anomalies.push(Anomaly {
+                    category: "Code Integrity".into(),
+                    severity: "critical".into(),
+                    description: format!(
+                        "Section '{}' is both writable and executable (W^X violation)",
+                        sec.name
+                    ),
+                });
+            }
+
+            // Rule 15: Non-standard section name
+            if !standard_names.contains(&sec.name.as_str()) {
+                anomalies.push(Anomaly {
+                    category: "Structure".into(),
+                    severity: "info".into(),
+                    description: format!("Non-standard section name '{}'", sec.name),
+                });
+            }
+        }
+
+        // Rule 6: Entry point not in .text
+        if let Some(opt) = optional_header {
+            let ep = opt.address_of_entry_point;
+            if ep > 0 {
+                let ep_section = sections.iter().find(|s| {
+                    let start = s.virtual_address as u64;
+                    let end = start + s.virtual_size as u64;
+                    ep >= start && ep < end
+                });
+                if let Some(sec) = ep_section {
+                    if sec.name != ".text" {
+                        anomalies.push(Anomaly {
+                            category: "Code Integrity".into(),
+                            severity: "warning".into(),
+                            description: format!(
+                                "Entry point ({:#x}) is in section '{}' instead of '.text'",
+                                ep, sec.name
+                            ),
+                        });
+                    }
+                }
+            }
+        }
+
+        // Rule 16: Section count 0 or >= 10
+        if sections.is_empty() {
+            anomalies.push(Anomaly {
+                category: "Structure".into(),
+                severity: "warning".into(),
+                description: "PE has no sections".into(),
+            });
+        } else if sections.len() >= 10 {
+            anomalies.push(Anomaly {
+                category: "Structure".into(),
+                severity: "warning".into(),
+                description: format!("Unusual number of sections ({})", sections.len()),
+            });
+        }
+    }
+
+    // Security feature checks (Rules 7-10)
+    if let Some(opt) = optional_header {
+        let dll_chars = opt.dll_characteristics;
+
+        // Rule 7: ASLR disabled
+        if dll_chars & 0x0040 == 0 {
+            anomalies.push(Anomaly {
+                category: "Security".into(),
+                severity: "warning".into(),
+                description: "ASLR (DYNAMIC_BASE) is disabled".into(),
+            });
+        }
+
+        // Rule 8: DEP disabled
+        if dll_chars & 0x0100 == 0 {
+            anomalies.push(Anomaly {
+                category: "Security".into(),
+                severity: "warning".into(),
+                description: "DEP (NX_COMPAT) is disabled".into(),
+            });
+        }
+
+        // Rule 9: CFG disabled
+        if dll_chars & 0x4000 == 0 {
+            anomalies.push(Anomaly {
+                category: "Security".into(),
+                severity: "info".into(),
+                description: "Control Flow Guard (GUARD_CF) is not enabled".into(),
+            });
+        }
+
+        // Rule 10: NO_SEH set
+        if dll_chars & 0x0400 != 0 {
+            anomalies.push(Anomaly {
+                category: "Security".into(),
+                severity: "info".into(),
+                description: "NO_SEH is set — SEH-based protections are disabled".into(),
+            });
+        }
+    }
+
+    // Timestamp checks (Rules 11-13)
+    if let Some(coff) = coff_header {
+        let ts = coff.time_date_stamp;
+        if ts == 0 {
+            // Rule 13: Timestamp is 0
+            anomalies.push(Anomaly {
+                category: "Timestamp".into(),
+                severity: "info".into(),
+                description: "Timestamp is 0 (stripped or not set)".into(),
+            });
+        } else {
+            // Rule 11: Timestamp in future
+            let now = SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .map(|d| d.as_secs() as u32)
+                .unwrap_or(0);
+            if now > 0 && ts > now {
+                anomalies.push(Anomaly {
+                    category: "Timestamp".into(),
+                    severity: "warning".into(),
+                    description: format!(
+                        "Timestamp ({}) is in the future", coff.time_date_stamp_str
+                    ),
+                });
+            }
+
+            // Rule 12: Timestamp before 2000 (946684800 = 2000-01-01 UTC)
+            if ts < 946_684_800 {
+                anomalies.push(Anomaly {
+                    category: "Timestamp".into(),
+                    severity: "warning".into(),
+                    description: format!(
+                        "Timestamp ({}) is before year 2000 — possible forgery",
+                        coff.time_date_stamp_str
+                    ),
+                });
+            }
+        }
+    }
+
+    // Rule 14: Overlay detected
+    if let Some(overlay) = overlay {
+        if overlay.present {
+            anomalies.push(Anomaly {
+                category: "Structure".into(),
+                severity: "warning".into(),
+                description: format!(
+                    "Overlay data detected ({} bytes at offset {:#x})",
+                    overlay.size, overlay.offset
+                ),
+            });
+        }
+    }
+
+    // Suspicious combo rules (Rules 17-18)
+    if let Some(summary) = suspicious_summary {
+        let has_category = |name: &str| {
+            summary.categories.iter().any(|c| c.category == name)
+        };
+
+        // Rule 17: Process Injection + Evasion
+        if has_category("Process Injection") && has_category("Evasion") {
+            anomalies.push(Anomaly {
+                category: "Suspicious Combo".into(),
+                severity: "critical".into(),
+                description: "Process Injection + Evasion APIs both present — possible code injection technique".into(),
+            });
+        }
+
+        // Rule 18: Network + Crypto
+        if has_category("Network") && has_category("Crypto") {
+            anomalies.push(Anomaly {
+                category: "Suspicious Combo".into(),
+                severity: "warning".into(),
+                description: "Network + Crypto APIs both present — possible encrypted C2 communication".into(),
+            });
+        }
+    }
+
+    anomalies
 }
 
 fn parse_dos_header(data: &[u8]) -> DosHeader {
