@@ -3,7 +3,7 @@ name = "readpe"
 version = "0.1.0"
 edition = "2024"
 description = "Cross-platform PE file surface analysis tool for malware analysts"
-license = "MIT"
+license = "Apache-2.0"
 
 [features]
 gui = ["dep:eframe", "dep:egui", "dep:egui_extras", "dep:rfd"]

@@ -177,4 +177,4 @@ The GUI provides:
 
 ## License
 
-MIT
+Apache-2.0
