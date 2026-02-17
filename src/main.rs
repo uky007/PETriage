@@ -74,6 +74,10 @@ fn main() {
         return;
     }
 
+    if !cli.json {
+        output::print_banner();
+    }
+
     let file = match cli.file {
         Some(f) => f,
         None => {

@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use goblin::pe::PE;
 use md5::Digest;
 use serde::Serialize;
@@ -40,6 +42,8 @@ pub struct AnalysisResult {
     pub hashes: Option<HashInfo>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub overlay: Option<OverlayInfo>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub suspicious_summary: Option<SuspiciousSummary>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -113,7 +117,35 @@ pub struct SectionInfo {
 #[derive(Clone, Debug, Serialize)]
 pub struct ImportEntry {
     pub dll: String,
-    pub functions: Vec<String>,
+    pub functions: Vec<FunctionInfo>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct FunctionInfo {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub risk: Option<ApiRisk>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ApiRisk {
+    pub category: String,
+    pub severity: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct SuspiciousSummary {
+    pub total_suspicious: usize,
+    pub high_count: usize,
+    pub medium_count: usize,
+    pub low_count: usize,
+    pub categories: Vec<CategoryCount>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct CategoryCount {
+    pub category: String,
+    pub count: usize,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -207,6 +239,8 @@ pub fn analyze(data: &[u8], pe: &PE, opts: &AnalysisOptions) -> AnalysisResult {
         None
     };
 
+    let suspicious_summary = imports.as_ref().map(|imp| build_suspicious_summary(imp));
+
     AnalysisResult {
         file_info,
         dos_header,
@@ -218,6 +252,7 @@ pub fn analyze(data: &[u8], pe: &PE, opts: &AnalysisOptions) -> AnalysisResult {
         strings,
         hashes,
         overlay,
+        suspicious_summary,
     }
 }
 
@@ -398,21 +433,283 @@ fn parse_sections(data: &[u8], pe: &PE) -> Vec<SectionInfo> {
 }
 
 fn parse_imports(pe: &PE) -> Vec<ImportEntry> {
+    let risk_db = build_risk_db();
     let mut result = Vec::new();
     for import in &pe.imports {
         let dll = import.dll.to_string();
         let func_name = import.name.to_string();
+        let risk = classify_api(&func_name, &risk_db);
+        let func_info = FunctionInfo { name: func_name, risk };
 
         if let Some(entry) = result.iter_mut().find(|e: &&mut ImportEntry| e.dll == dll) {
-            entry.functions.push(func_name);
+            entry.functions.push(func_info);
         } else {
             result.push(ImportEntry {
                 dll,
-                functions: vec![func_name],
+                functions: vec![func_info],
             });
         }
     }
     result
+}
+
+fn classify_api(name: &str, db: &HashMap<&str, (&str, &str)>) -> Option<ApiRisk> {
+    db.get(name).map(|(category, severity)| ApiRisk {
+        category: category.to_string(),
+        severity: severity.to_string(),
+    })
+}
+
+fn build_risk_db() -> HashMap<&'static str, (&'static str, &'static str)> {
+    let entries: &[(&str, &str, &str)] = &[
+        // Process Injection
+        ("CreateRemoteThread", "Process Injection", "high"),
+        ("CreateRemoteThreadEx", "Process Injection", "high"),
+        ("VirtualAllocEx", "Process Injection", "high"),
+        ("VirtualAllocExNuma", "Process Injection", "high"),
+        ("WriteProcessMemory", "Process Injection", "high"),
+        ("NtMapViewOfSection", "Process Injection", "high"),
+        ("NtWriteVirtualMemory", "Process Injection", "high"),
+        ("NtAllocateVirtualMemory", "Process Injection", "high"),
+        ("QueueUserAPC", "Process Injection", "high"),
+        ("NtQueueApcThread", "Process Injection", "high"),
+        ("SetThreadContext", "Process Injection", "high"),
+        ("NtSetContextThread", "Process Injection", "high"),
+        ("RtlCreateUserThread", "Process Injection", "high"),
+        ("OpenProcess", "Process Injection", "medium"),
+
+        // Code Execution
+        ("WinExec", "Code Execution", "high"),
+        ("ShellExecuteA", "Code Execution", "high"),
+        ("ShellExecuteW", "Code Execution", "high"),
+        ("ShellExecuteExA", "Code Execution", "high"),
+        ("ShellExecuteExW", "Code Execution", "high"),
+        ("CreateProcessA", "Code Execution", "high"),
+        ("CreateProcessW", "Code Execution", "high"),
+        ("CreateProcessInternalA", "Code Execution", "high"),
+        ("CreateProcessInternalW", "Code Execution", "high"),
+        ("system", "Code Execution", "high"),
+        ("_wsystem", "Code Execution", "high"),
+        ("CreateProcessAsUserA", "Code Execution", "high"),
+        ("CreateProcessAsUserW", "Code Execution", "high"),
+        ("CreateProcessWithLogonW", "Code Execution", "high"),
+        ("CreateProcessWithTokenW", "Code Execution", "high"),
+        ("NtCreateProcess", "Code Execution", "high"),
+        ("NtCreateProcessEx", "Code Execution", "high"),
+
+        // Keylogging / Input Capture
+        ("SetWindowsHookExA", "Keylogging / Input", "high"),
+        ("SetWindowsHookExW", "Keylogging / Input", "high"),
+        ("GetAsyncKeyState", "Keylogging / Input", "high"),
+        ("GetKeyState", "Keylogging / Input", "medium"),
+        ("GetKeyboardState", "Keylogging / Input", "medium"),
+        ("GetRawInputData", "Keylogging / Input", "medium"),
+        ("RegisterRawInputDevices", "Keylogging / Input", "medium"),
+        ("MapVirtualKeyA", "Keylogging / Input", "low"),
+        ("MapVirtualKeyW", "Keylogging / Input", "low"),
+
+        // Anti-Debug
+        ("IsDebuggerPresent", "Anti-Debug", "high"),
+        ("CheckRemoteDebuggerPresent", "Anti-Debug", "high"),
+        ("NtQueryInformationProcess", "Anti-Debug", "high"),
+        ("OutputDebugStringA", "Anti-Debug", "medium"),
+        ("OutputDebugStringW", "Anti-Debug", "medium"),
+        ("NtSetInformationThread", "Anti-Debug", "high"),
+        ("NtClose", "Anti-Debug", "low"),
+        ("CloseHandle", "Anti-Debug", "low"),
+
+        // Anti-VM / Anti-Sandbox
+        ("GetTickCount", "Anti-VM", "medium"),
+        ("GetTickCount64", "Anti-VM", "medium"),
+        ("QueryPerformanceCounter", "Anti-VM", "medium"),
+        ("QueryPerformanceFrequency", "Anti-VM", "low"),
+        ("Sleep", "Anti-VM", "low"),
+        ("SleepEx", "Anti-VM", "low"),
+        ("GetCursorPos", "Anti-VM", "low"),
+        ("GetForegroundWindow", "Anti-VM", "low"),
+
+        // Persistence
+        ("RegSetValueExA", "Persistence", "high"),
+        ("RegSetValueExW", "Persistence", "high"),
+        ("RegCreateKeyExA", "Persistence", "high"),
+        ("RegCreateKeyExW", "Persistence", "high"),
+        ("CreateServiceA", "Persistence", "high"),
+        ("CreateServiceW", "Persistence", "high"),
+        ("StartServiceA", "Persistence", "medium"),
+        ("StartServiceW", "Persistence", "medium"),
+        ("ChangeServiceConfigA", "Persistence", "high"),
+        ("ChangeServiceConfigW", "Persistence", "high"),
+        ("OpenSCManagerA", "Persistence", "medium"),
+        ("OpenSCManagerW", "Persistence", "medium"),
+
+        // Privilege Escalation
+        ("AdjustTokenPrivileges", "Privilege Escalation", "high"),
+        ("OpenProcessToken", "Privilege Escalation", "high"),
+        ("OpenThreadToken", "Privilege Escalation", "medium"),
+        ("LookupPrivilegeValueA", "Privilege Escalation", "high"),
+        ("LookupPrivilegeValueW", "Privilege Escalation", "high"),
+        ("ImpersonateLoggedOnUser", "Privilege Escalation", "high"),
+        ("DuplicateTokenEx", "Privilege Escalation", "high"),
+        ("SetTokenInformation", "Privilege Escalation", "medium"),
+
+        // Crypto
+        ("CryptEncrypt", "Crypto", "high"),
+        ("CryptDecrypt", "Crypto", "high"),
+        ("CryptGenKey", "Crypto", "medium"),
+        ("CryptAcquireContextA", "Crypto", "medium"),
+        ("CryptAcquireContextW", "Crypto", "medium"),
+        ("CryptCreateHash", "Crypto", "low"),
+        ("CryptHashData", "Crypto", "low"),
+        ("CryptDeriveKey", "Crypto", "medium"),
+        ("CryptImportKey", "Crypto", "medium"),
+        ("CryptExportKey", "Crypto", "medium"),
+        ("BCryptEncrypt", "Crypto", "high"),
+        ("BCryptDecrypt", "Crypto", "high"),
+        ("BCryptGenerateSymmetricKey", "Crypto", "medium"),
+
+        // Network
+        ("InternetOpenA", "Network", "high"),
+        ("InternetOpenW", "Network", "high"),
+        ("InternetOpenUrlA", "Network", "high"),
+        ("InternetOpenUrlW", "Network", "high"),
+        ("InternetConnectA", "Network", "high"),
+        ("InternetConnectW", "Network", "high"),
+        ("InternetReadFile", "Network", "medium"),
+        ("InternetWriteFile", "Network", "medium"),
+        ("HttpOpenRequestA", "Network", "medium"),
+        ("HttpOpenRequestW", "Network", "medium"),
+        ("HttpSendRequestA", "Network", "high"),
+        ("HttpSendRequestW", "Network", "high"),
+        ("URLDownloadToFileA", "Network", "high"),
+        ("URLDownloadToFileW", "Network", "high"),
+        ("URLDownloadToCacheFileA", "Network", "high"),
+        ("URLDownloadToCacheFileW", "Network", "high"),
+        ("WSAStartup", "Network", "medium"),
+        ("WSASocketA", "Network", "medium"),
+        ("WSASocketW", "Network", "medium"),
+        ("connect", "Network", "medium"),
+        ("send", "Network", "medium"),
+        ("recv", "Network", "medium"),
+        ("sendto", "Network", "medium"),
+        ("recvfrom", "Network", "medium"),
+        ("socket", "Network", "medium"),
+        ("bind", "Network", "low"),
+        ("listen", "Network", "low"),
+        ("accept", "Network", "low"),
+        ("WinHttpOpen", "Network", "high"),
+        ("WinHttpConnect", "Network", "high"),
+        ("WinHttpOpenRequest", "Network", "medium"),
+        ("WinHttpSendRequest", "Network", "high"),
+        ("WinHttpReadData", "Network", "medium"),
+
+        // File / Registry Operations
+        ("DeleteFileA", "File / Registry", "high"),
+        ("DeleteFileW", "File / Registry", "high"),
+        ("MoveFileA", "File / Registry", "medium"),
+        ("MoveFileW", "File / Registry", "medium"),
+        ("MoveFileExA", "File / Registry", "medium"),
+        ("MoveFileExW", "File / Registry", "medium"),
+        ("CopyFileA", "File / Registry", "medium"),
+        ("CopyFileW", "File / Registry", "medium"),
+        ("CreateFileA", "File / Registry", "low"),
+        ("CreateFileW", "File / Registry", "low"),
+        ("WriteFile", "File / Registry", "low"),
+        ("ReadFile", "File / Registry", "low"),
+        ("RegOpenKeyExA", "File / Registry", "low"),
+        ("RegOpenKeyExW", "File / Registry", "low"),
+        ("RegQueryValueExA", "File / Registry", "low"),
+        ("RegQueryValueExW", "File / Registry", "low"),
+        ("RegDeleteKeyA", "File / Registry", "high"),
+        ("RegDeleteKeyW", "File / Registry", "high"),
+        ("RegDeleteValueA", "File / Registry", "high"),
+        ("RegDeleteValueW", "File / Registry", "high"),
+
+        // Evasion
+        ("VirtualProtect", "Evasion", "high"),
+        ("VirtualProtectEx", "Evasion", "high"),
+        ("NtUnmapViewOfSection", "Evasion", "high"),
+        ("SetFileTime", "Evasion", "high"),
+        ("SetFileAttributesA", "Evasion", "medium"),
+        ("SetFileAttributesW", "Evasion", "medium"),
+        ("NtSetInformationFile", "Evasion", "medium"),
+        ("CreateFileMappingA", "Evasion", "medium"),
+        ("CreateFileMappingW", "Evasion", "medium"),
+        ("MapViewOfFile", "Evasion", "medium"),
+        ("UnmapViewOfFile", "Evasion", "low"),
+
+        // Info Gathering
+        ("GetComputerNameA", "Info Gathering", "medium"),
+        ("GetComputerNameW", "Info Gathering", "medium"),
+        ("GetUserNameA", "Info Gathering", "medium"),
+        ("GetUserNameW", "Info Gathering", "medium"),
+        ("GetSystemInfo", "Info Gathering", "medium"),
+        ("GetNativeSystemInfo", "Info Gathering", "medium"),
+        ("GetVersionExA", "Info Gathering", "low"),
+        ("GetVersionExW", "Info Gathering", "low"),
+        ("GetSystemDirectoryA", "Info Gathering", "low"),
+        ("GetSystemDirectoryW", "Info Gathering", "low"),
+        ("GetWindowsDirectoryA", "Info Gathering", "low"),
+        ("GetWindowsDirectoryW", "Info Gathering", "low"),
+        ("GetTempPathA", "Info Gathering", "low"),
+        ("GetTempPathW", "Info Gathering", "low"),
+        ("GetModuleFileNameA", "Info Gathering", "low"),
+        ("GetModuleFileNameW", "Info Gathering", "low"),
+        ("GetCurrentProcessId", "Info Gathering", "low"),
+        ("GetCurrentProcess", "Info Gathering", "low"),
+        ("GetEnvironmentVariableA", "Info Gathering", "low"),
+        ("GetEnvironmentVariableW", "Info Gathering", "low"),
+        ("GetAdaptersInfo", "Info Gathering", "medium"),
+        ("GetAdaptersAddresses", "Info Gathering", "medium"),
+        ("NetUserEnum", "Info Gathering", "medium"),
+        ("NetShareEnum", "Info Gathering", "medium"),
+        ("LookupAccountSidA", "Info Gathering", "low"),
+        ("LookupAccountSidW", "Info Gathering", "low"),
+        ("GetModuleHandleA", "Info Gathering", "low"),
+        ("GetModuleHandleW", "Info Gathering", "low"),
+        ("GetProcAddress", "Info Gathering", "medium"),
+        ("LoadLibraryA", "Info Gathering", "medium"),
+        ("LoadLibraryW", "Info Gathering", "medium"),
+        ("LoadLibraryExA", "Info Gathering", "medium"),
+        ("LoadLibraryExW", "Info Gathering", "medium"),
+    ];
+
+    entries.iter().map(|&(name, cat, sev)| (name, (cat, sev))).collect()
+}
+
+fn build_suspicious_summary(imports: &[ImportEntry]) -> SuspiciousSummary {
+    let mut high = 0usize;
+    let mut medium = 0usize;
+    let mut low = 0usize;
+    let mut cat_counts: HashMap<String, usize> = HashMap::new();
+
+    for entry in imports {
+        for func in &entry.functions {
+            if let Some(ref risk) = func.risk {
+                match risk.severity.as_str() {
+                    "high" => high += 1,
+                    "medium" => medium += 1,
+                    "low" => low += 1,
+                    _ => {}
+                }
+                *cat_counts.entry(risk.category.clone()).or_insert(0) += 1;
+            }
+        }
+    }
+
+    let total_suspicious = high + medium + low;
+    let mut categories: Vec<CategoryCount> = cat_counts
+        .into_iter()
+        .map(|(category, count)| CategoryCount { category, count })
+        .collect();
+    categories.sort_by(|a, b| b.count.cmp(&a.count));
+
+    SuspiciousSummary {
+        total_suspicious,
+        high_count: high,
+        medium_count: medium,
+        low_count: low,
+        categories,
+    }
 }
 
 fn parse_exports(pe: &PE) -> Vec<ExportEntry> {

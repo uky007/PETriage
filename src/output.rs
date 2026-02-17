@@ -1,4 +1,24 @@
+use colored::Colorize;
+
 use crate::analysis::AnalysisResult;
+
+pub fn print_banner() {
+    let version = env!("CARGO_PKG_VERSION");
+    let art = format!(
+        r#"
+  {}
+  {}
+  {}  {}
+  {}
+"#,
+        "╦═╗╔═╗╔═╗╔╦╗╔═╗╔═╗".cyan().bold(),
+        "╠╦╝║╣ ╠═╣ ║║╠═╝║╣".cyan().bold(),
+        "╩╚═╚═╝╩ ╩═╩╝╩  ╚═╝".cyan().bold(),
+        format!("v{version}").white().dimmed(),
+        "PE file surface analysis".white().dimmed(),
+    );
+    eprint!("{art}");
+}
 
 pub fn format_json(result: &AnalysisResult) -> String {
     serde_json::to_string_pretty(result).unwrap_or_else(|e| format!("JSON error: {}", e))
@@ -101,10 +121,38 @@ pub fn format_text(result: &AnalysisResult) -> String {
         for imp in imports {
             out.push_str(&format!("  {} ({} functions)\n", imp.dll, imp.functions.len()));
             for func in &imp.functions {
-                out.push_str(&format!("    - {}\n", func));
+                if let Some(ref risk) = func.risk {
+                    let tag = match risk.severity.as_str() {
+                        "high" => format!("{}", "[HIGH]".red().bold()),
+                        "medium" => format!("{}", "[MED]".yellow()),
+                        "low" => format!("{}", "[LOW]".cyan()),
+                        _ => String::new(),
+                    };
+                    out.push_str(&format!("    - {} {} {}\n", func.name, tag, risk.category.dimmed()));
+                } else {
+                    out.push_str(&format!("    - {}\n", func.name));
+                }
             }
         }
         out.push('\n');
+    }
+
+    if let Some(ref summary) = result.suspicious_summary {
+        if summary.total_suspicious > 0 {
+            out.push_str(&format!("=== Suspicious API Summary ===\n"));
+            out.push_str(&format!("  Total suspicious APIs: {}\n", summary.total_suspicious));
+            out.push_str(&format!("  {} {} {}\n",
+                format!("HIGH: {}", summary.high_count).red().bold(),
+                format!("MEDIUM: {}", summary.medium_count).yellow(),
+                format!("LOW: {}", summary.low_count).cyan(),
+            ));
+            out.push_str(&format!("\n  {:<24} {:>5}\n", "Category", "Count"));
+            out.push_str(&format!("  {:-<24} {:-<5}\n", "", ""));
+            for cat in &summary.categories {
+                out.push_str(&format!("  {:<24} {:>5}\n", cat.category, cat.count));
+            }
+            out.push('\n');
+        }
     }
 
     if let Some(ref exports) = result.exports {

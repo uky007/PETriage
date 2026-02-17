@@ -24,13 +24,14 @@ Malware analysts frequently examine Windows PE files, but the most capable surfa
 | COFF Header | Machine type, timestamp, characteristics |
 | Optional Header | Magic, entry point, image base, subsystem, DLL characteristics, data directories |
 | Sections | Name, virtual/raw size and address, characteristics, Shannon entropy |
-| Imports | DLL names and imported function names |
+| Imports | DLL names and imported function names with suspicious API indicators |
 | Exports | Exported function names, ordinals, RVAs |
 | Strings | ASCII and UTF-16LE extraction with configurable minimum length |
 | Hashes | MD5, SHA1, SHA256 of the entire file |
 | Overlay | Detection of data appended beyond the PE structure |
+| Suspicious API Indicators | Auto-tags ~130 Windows APIs across 12 risk categories (Process Injection, Code Execution, Network, Evasion, etc.) with severity levels (high/medium/low) |
 | Output | Human-readable tables (default) or JSON (`--json`), file output (`-o`) |
-| GUI | egui-based GUI with tabbed views, drag & drop, filters, entropy color-coding (opt-in via `--features gui`) |
+| GUI | egui-based GUI with tabbed views, drag & drop, filters, entropy color-coding, suspicious API highlighting (opt-in via `--features gui`) |
 
 ## Installation
 
@@ -76,6 +77,8 @@ readpe <file.exe> -s           # Sections only
 readpe <file.exe> -S           # Strings only
 readpe <file.exe> --hashes     # File hashes only
 readpe <file.exe> --json       # JSON output
+readpe <file.exe> --json | jq '.suspicious_summary'              # Suspicious API summary
+readpe <file.exe> --json | jq '.imports[].functions[] | select(.risk != null)'  # Risky APIs only
 readpe <file.exe> -o report.txt  # Write to file
 ```
 
@@ -91,9 +94,10 @@ The GUI provides:
 - **Tabbed interface** — File Info, Headers, Sections, Imports, Exports, Strings, Overlay
 - **Drag & drop** — Drop PE files onto the window to analyze
 - **Left sidebar** — Toggle analysis options and re-analyze without restarting
-- **Import filter** — Search API names across DLLs (useful for malware triage)
+- **Import filter** — Search API names across DLLs, "Suspicious only" toggle to surface risky APIs
 - **String filter** — Filter by text and encoding (ASCII / UTF-16)
 - **Entropy color-coding** — Section entropy highlighted green (<6) / yellow (6–7) / red (7–8)
+- **Suspicious API indicators** — Color-coded severity badges (red/yellow/cyan) on File Info and Imports tabs
 - **Hash copy buttons** — One-click copy of MD5/SHA1/SHA256
 - **Virtual scroll** — Handles tens of thousands of strings without lag
 
@@ -123,11 +127,34 @@ The GUI provides:
   .text      0x00008a00 0x0000001000 0x00008c00 0x0000000400  6.4521 CODE | EXECUTE | READ
   .rdata     0x00002600 0x000000a000 0x00002800 0x0000009000  5.1032 INITIALIZED_DATA | READ
   ...
+
+=== Imports (4 DLLs, 32 functions) ===
+  KERNEL32.dll (18 functions)
+    - CreateProcessW [HIGH] Code Execution
+    - VirtualAllocEx [HIGH] Process Injection
+    - WriteProcessMemory [HIGH] Process Injection
+    - VirtualProtect [HIGH] Evasion
+    - GetComputerNameA [MED] Info Gathering
+    - CreateFileA [LOW] File / Registry
+    - ReadFile
+    - CloseHandle [LOW] Anti-Debug
+    ...
+
+=== Suspicious API Summary ===
+  Total suspicious APIs: 14
+  HIGH: 6 MEDIUM: 5 LOW: 3
+
+  Category                 Count
+  ------------------------ -----
+  Process Injection            3
+  Code Execution               2
+  Network                      2
+  ...
 ```
 
 ## Roadmap
 
-- **v0.2**: Resource directory, Rich header, TLS/Debug directories, suspicious API indicators, anomaly detection
+- **v0.2**: Resource directory, Rich header, TLS/Debug directories, anomaly detection
 - **v0.3**: .NET metadata, Authenticode signatures, packer detection, entropy histogram
 - **Future**: ELF format support
 

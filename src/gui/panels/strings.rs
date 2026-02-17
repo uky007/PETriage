@@ -1,7 +1,11 @@
-use egui::Ui;
+use egui::{Color32, CornerRadius, Ui};
 use egui_extras::{Column, TableBuilder};
 
 use crate::analysis::AnalysisResult;
+
+const ACCENT: Color32 = Color32::from_rgb(0, 210, 255);
+const ACCENT_DIM: Color32 = Color32::from_rgb(0, 120, 150);
+const LABEL: Color32 = Color32::from_rgb(120, 130, 150);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EncodingFilter {
@@ -28,25 +32,48 @@ pub fn show(ui: &mut Ui, result: &AnalysisResult, state: &mut StringsState) {
     let strings = match result.strings {
         Some(ref s) => s,
         None => {
-            ui.label("No string data available. Enable 'Strings' in options and re-analyze.");
+            ui.colored_label(LABEL, "No string data available. Enable 'Strings' in options and re-analyze.");
             return;
         }
     };
 
-    ui.heading(format!("Strings ({})", strings.len()));
-    ui.add_space(4.0);
+    ui.colored_label(ACCENT, egui::RichText::new(format!("STRINGS ({})", strings.len())).size(14.0));
+    ui.add_space(6.0);
 
+    // Filter bar
     ui.horizontal(|ui| {
-        ui.label("Filter:");
-        ui.text_edit_singleline(&mut state.filter);
-        if ui.small_button("Clear").clicked() {
-            state.filter.clear();
+        ui.colored_label(LABEL, "\u{1f50d}");
+        ui.add(
+            egui::TextEdit::singleline(&mut state.filter)
+                .hint_text("Filter strings...")
+                .desired_width(250.0),
+        );
+        if !state.filter.is_empty() {
+            if ui.small_button("\u{2715}").clicked() {
+                state.filter.clear();
+            }
         }
         ui.separator();
-        ui.label("Encoding:");
-        ui.selectable_value(&mut state.encoding_filter, EncodingFilter::All, "All");
-        ui.selectable_value(&mut state.encoding_filter, EncodingFilter::Ascii, "ASCII");
-        ui.selectable_value(&mut state.encoding_filter, EncodingFilter::Utf16, "UTF-16");
+        ui.colored_label(LABEL, "Encoding:");
+        let enc_btn = |val: EncodingFilter, label: &str, current: &mut EncodingFilter, ui: &mut Ui| {
+            let selected = *current == val;
+            let text = egui::RichText::new(label)
+                .color(if selected { ACCENT } else { LABEL });
+            let btn = egui::Button::new(text)
+                .fill(if selected { Color32::from_rgb(0, 60, 90) } else { Color32::TRANSPARENT })
+                .stroke(if selected {
+                    egui::Stroke::new(1.0, ACCENT_DIM)
+                } else {
+                    egui::Stroke::NONE
+                })
+                .corner_radius(CornerRadius::same(3));
+            if ui.add(btn).clicked() {
+                *current = val;
+            }
+        };
+        enc_btn(EncodingFilter::All, "All", &mut state.encoding_filter, ui);
+        enc_btn(EncodingFilter::Ascii, "ASCII", &mut state.encoding_filter, ui);
+        enc_btn(EncodingFilter::Utf16, "UTF-16", &mut state.encoding_filter, ui);
     });
     ui.add_space(4.0);
 
@@ -66,7 +93,7 @@ pub fn show(ui: &mut Ui, result: &AnalysisResult, state: &mut StringsState) {
         })
         .collect();
 
-    ui.label(format!("Showing {} of {} strings", filtered.len(), strings.len()));
+    ui.colored_label(LABEL, format!("Showing {} of {} strings", filtered.len(), strings.len()));
     ui.add_space(4.0);
 
     let available = ui.available_size();
@@ -76,19 +103,22 @@ pub fn show(ui: &mut Ui, result: &AnalysisResult, state: &mut StringsState) {
         .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
         .min_scrolled_height(0.0)
         .max_scroll_height(available.y)
-        .column(Column::auto().at_least(100.0)) // Offset
-        .column(Column::auto().at_least(70.0)) // Encoding
-        .column(Column::remainder()) // Value
-        .header(18.0, |mut header| {
-            header.col(|ui| { ui.strong("Offset"); });
-            header.col(|ui| { ui.strong("Encoding"); });
-            header.col(|ui| { ui.strong("Value"); });
+        .column(Column::auto().at_least(100.0))
+        .column(Column::auto().at_least(70.0))
+        .column(Column::remainder())
+        .header(20.0, |mut header| {
+            header.col(|ui| { ui.colored_label(LABEL, "Offset"); });
+            header.col(|ui| { ui.colored_label(LABEL, "Encoding"); });
+            header.col(|ui| { ui.colored_label(LABEL, "Value"); });
         })
         .body(|body| {
-            body.rows(18.0, filtered.len(), |mut row| {
+            body.rows(20.0, filtered.len(), |mut row| {
                 let s = &filtered[row.index()];
                 row.col(|ui| { ui.monospace(format!("{:#010x}", s.offset)); });
-                row.col(|ui| { ui.monospace(&s.encoding); });
+                row.col(|ui| {
+                    let color = if s.encoding == "UTF-16LE" { ACCENT_DIM } else { LABEL };
+                    ui.colored_label(color, &s.encoding);
+                });
                 row.col(|ui| { ui.monospace(&s.value); });
             });
         });
