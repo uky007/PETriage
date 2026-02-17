@@ -1,6 +1,6 @@
 # readpe
 
-A fast, cross-platform CLI tool for PE (Portable Executable) file surface analysis, written in Rust.
+A fast, cross-platform PE (Portable Executable) file surface analysis tool with CLI and GUI, written in Rust.
 
 ## Motivation
 
@@ -30,10 +30,11 @@ Malware analysts frequently examine Windows PE files, but the most capable surfa
 | Hashes | MD5, SHA1, SHA256 of the entire file |
 | Overlay | Detection of data appended beyond the PE structure |
 | Output | Human-readable tables (default) or JSON (`--json`), file output (`-o`) |
+| GUI | egui-based GUI with tabbed views, drag & drop, filters, entropy color-coding (opt-in via `--features gui`) |
 
 ## Installation
 
-### Build from source
+### Build from source (CLI only)
 
 ```
 git clone https://github.com/uky007/readpe.git
@@ -42,6 +43,18 @@ cargo build --release
 ```
 
 The binary will be at `target/release/readpe`.
+
+### Build with GUI
+
+```
+cargo build --release --features gui
+```
+
+GUI requires system libraries for the graphics backend (OpenGL/Vulkan). On Debian/Ubuntu:
+
+```
+sudo apt install libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libssl-dev libgtk-3-dev
+```
 
 ### Cross-compilation
 
@@ -53,6 +66,8 @@ cargo build --release --target x86_64-pc-windows-gnu
 
 ## Usage
 
+### CLI
+
 ```
 readpe <file.exe>              # Show all information
 readpe <file.exe> -H           # Headers only
@@ -63,6 +78,24 @@ readpe <file.exe> --hashes     # File hashes only
 readpe <file.exe> --json       # JSON output
 readpe <file.exe> -o report.txt  # Write to file
 ```
+
+### GUI (requires `--features gui` build)
+
+```
+readpe --gui                   # Open with file dialog
+readpe --gui <file.exe>        # Open file directly in GUI
+```
+
+The GUI provides:
+
+- **Tabbed interface** — File Info, Headers, Sections, Imports, Exports, Strings, Overlay
+- **Drag & drop** — Drop PE files onto the window to analyze
+- **Left sidebar** — Toggle analysis options and re-analyze without restarting
+- **Import filter** — Search API names across DLLs (useful for malware triage)
+- **String filter** — Filter by text and encoding (ASCII / UTF-16)
+- **Entropy color-coding** — Section entropy highlighted green (<6) / yellow (6–7) / red (7–8)
+- **Hash copy buttons** — One-click copy of MD5/SHA1/SHA256
+- **Virtual scroll** — Handles tens of thousands of strings without lag
 
 ### Example output
 
@@ -96,7 +129,7 @@ readpe <file.exe> -o report.txt  # Write to file
 
 - **v0.2**: Resource directory, Rich header, TLS/Debug directories, suspicious API indicators, anomaly detection
 - **v0.3**: .NET metadata, Authenticode signatures, packer detection, entropy histogram
-- **Future**: GUI frontend, ELF format support
+- **Future**: ELF format support
 
 ## License
 

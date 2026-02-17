@@ -1,4 +1,6 @@
 mod analysis;
+#[cfg(feature = "gui")]
+mod gui;
 mod output;
 
 use std::fs;
@@ -11,7 +13,7 @@ use clap::Parser;
 #[command(name = "readpe", version, about = "Cross-platform PE file surface analysis tool")]
 struct Cli {
     /// PE file to analyze
-    file: PathBuf,
+    file: Option<PathBuf>,
 
     /// Show all information (default if no flags specified)
     #[arg(short = 'a', long)]
@@ -56,15 +58,35 @@ struct Cli {
     /// Write output to file
     #[arg(short = 'o', long)]
     output: Option<PathBuf>,
+
+    /// Launch GUI mode
+    #[cfg(feature = "gui")]
+    #[arg(long)]
+    gui: bool,
 }
 
 fn main() {
     let cli = Cli::parse();
 
-    let data = match fs::read(&cli.file) {
+    #[cfg(feature = "gui")]
+    if cli.gui {
+        gui::run(cli.file);
+        return;
+    }
+
+    let file = match cli.file {
+        Some(f) => f,
+        None => {
+            eprintln!("Error: PE file path is required for CLI mode");
+            eprintln!("Usage: readpe <FILE>");
+            process::exit(1);
+        }
+    };
+
+    let data = match fs::read(&file) {
         Ok(d) => d,
         Err(e) => {
-            eprintln!("Error: Failed to read '{}': {}", cli.file.display(), e);
+            eprintln!("Error: Failed to read '{}': {}", file.display(), e);
             process::exit(1);
         }
     };
@@ -91,7 +113,7 @@ fn main() {
         show_hashes: show_all || cli.hashes,
         show_overlay: show_all || cli.overlay,
         min_str_len: cli.min_str_len,
-        file_name: cli.file.display().to_string(),
+        file_name: file.display().to_string(),
     });
 
     let output_text = if cli.json {

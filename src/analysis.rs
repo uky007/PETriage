@@ -18,7 +18,7 @@ pub struct AnalysisOptions {
     pub file_name: String,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Debug, Serialize)]
 pub struct AnalysisResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub file_info: Option<FileInfo>,
@@ -42,20 +42,20 @@ pub struct AnalysisResult {
     pub overlay: Option<OverlayInfo>,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Debug, Serialize)]
 pub struct FileInfo {
     pub name: String,
     pub size: usize,
     pub pe_type: String,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Debug, Serialize)]
 pub struct DosHeader {
     pub e_magic: String,
     pub e_lfanew: u32,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Debug, Serialize)]
 pub struct CoffHeader {
     pub machine: String,
     pub machine_raw: u16,
@@ -69,7 +69,7 @@ pub struct CoffHeader {
     pub characteristics_str: Vec<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Debug, Serialize)]
 pub struct OptionalHeader {
     pub magic: String,
     pub major_linker_version: u8,
@@ -91,14 +91,14 @@ pub struct OptionalHeader {
     pub data_directories: Vec<DataDirectory>,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Debug, Serialize)]
 pub struct DataDirectory {
     pub name: String,
     pub virtual_address: u32,
     pub size: u32,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Debug, Serialize)]
 pub struct SectionInfo {
     pub name: String,
     pub virtual_size: u32,
@@ -110,34 +110,34 @@ pub struct SectionInfo {
     pub entropy: f64,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Debug, Serialize)]
 pub struct ImportEntry {
     pub dll: String,
     pub functions: Vec<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Debug, Serialize)]
 pub struct ExportEntry {
     pub name: String,
     pub ordinal: usize,
     pub rva: usize,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Debug, Serialize)]
 pub struct StringEntry {
     pub offset: usize,
     pub value: String,
     pub encoding: String,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Debug, Serialize)]
 pub struct HashInfo {
     pub md5: String,
     pub sha1: String,
     pub sha256: String,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Debug, Serialize)]
 pub struct OverlayInfo {
     pub offset: usize,
     pub size: usize,
