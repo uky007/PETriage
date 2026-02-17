@@ -1,0 +1,16 @@
+[package]
+name = "readpe"
+version = "0.1.0"
+edition = "2024"
+description = "Cross-platform PE file surface analysis tool for malware analysts"
+license = "MIT"
+
+[dependencies]
+goblin = "0.9"
+clap = { version = "4", features = ["derive"] }
+md-5 = "0.10"
+sha1 = "0.10"
+sha2 = "0.10"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+colored = "3"
