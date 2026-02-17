@@ -5,3 +5,4 @@ pub mod imports;
 pub mod exports;
 pub mod strings;
 pub mod overlay;
+pub mod resources;

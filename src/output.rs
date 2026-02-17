@@ -204,6 +204,48 @@ pub fn format_text(result: &AnalysisResult) -> String {
         out.push('\n');
     }
 
+    if let Some(ref resources) = result.resources {
+        out.push_str(&format!("=== Resources ({} entries) ===\n", resources.total_entries));
+
+        if let Some(ref ver) = resources.version_info {
+            out.push_str("  Version Info:\n");
+            if let Some(ref fixed) = ver.fixed {
+                out.push_str(&format!("    FileVersion:    {}\n", fixed.file_version));
+                out.push_str(&format!("    ProductVersion: {}\n", fixed.product_version));
+                out.push_str(&format!("    FileType:       {} ({})\n", fixed.file_type_str, fixed.file_type));
+                out.push_str(&format!("    FileOS:         {:#x}\n", fixed.file_os));
+                out.push_str(&format!("    FileFlags:      {:#x}\n", fixed.file_flags));
+            }
+            if !ver.string_info.is_empty() {
+                out.push_str("    String Info:\n");
+                for s in &ver.string_info {
+                    out.push_str(&format!("      {:<24} {}\n", format!("{}:", s.key), s.value));
+                }
+            }
+            out.push('\n');
+        }
+
+        if let Some(ref manifest) = resources.manifest {
+            out.push_str("  Manifest:\n");
+            for line in manifest.lines() {
+                out.push_str(&format!("    {}\n", line));
+            }
+            out.push('\n');
+        }
+
+        if !resources.entries.is_empty() {
+            out.push_str(&format!("  {:<20} {:<16} {:<10} {:>8} {:>12}\n",
+                "Type", "Name", "Language", "Size", "RVA"));
+            out.push_str(&format!("  {:-<20} {:-<16} {:-<10} {:-<8} {:-<12}\n",
+                "", "", "", "", ""));
+            for e in &resources.entries {
+                out.push_str(&format!("  {:<20} {:<16} {:<10} {:>8} {:#012x}\n",
+                    e.resource_type, e.name, e.language_str, e.size, e.rva));
+            }
+        }
+        out.push('\n');
+    }
+
     if let Some(ref strings) = result.strings {
         out.push_str(&format!("=== Strings ({}) ===\n", strings.len()));
         for s in strings {

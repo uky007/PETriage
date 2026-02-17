@@ -51,6 +51,10 @@ struct Cli {
     #[arg(long)]
     overlay: bool,
 
+    /// Show PE resources (version info, manifest, resource entries)
+    #[arg(short = 'r', long)]
+    resources: bool,
+
     /// Output as JSON
     #[arg(long)]
     json: bool,
@@ -106,7 +110,7 @@ fn main() {
     // If no specific flags, show all
     let show_all = cli.all
         || !(cli.headers || cli.sections || cli.imports || cli.exports
-            || cli.strings || cli.hashes || cli.overlay);
+            || cli.strings || cli.hashes || cli.overlay || cli.resources);
 
     let result = analysis::analyze(&data, &pe, &analysis::AnalysisOptions {
         show_headers: show_all || cli.headers,
@@ -116,6 +120,7 @@ fn main() {
         show_strings: show_all || cli.strings,
         show_hashes: show_all || cli.hashes,
         show_overlay: show_all || cli.overlay,
+        show_resources: show_all || cli.resources,
         min_str_len: cli.min_str_len,
         file_name: file.display().to_string(),
     });

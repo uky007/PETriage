@@ -31,6 +31,7 @@ Malware analysts frequently examine Windows PE files, but the most capable surfa
 | Overlay | Detection of data appended beyond the PE structure |
 | Suspicious API Indicators | Auto-tags ~130 Windows APIs across 12 risk categories (Process Injection, Code Execution, Network, Evasion, etc.) with severity levels (high/medium/low) |
 | Anomaly Detection | 18 heuristic rules detecting packing indicators, W^X violations, missing security features (ASLR/DEP/CFG), timestamp anomalies, structural irregularities, and suspicious API combos |
+| Resource Directory | Resource tree enumeration, VS_VERSIONINFO parsing (FileVersion, CompanyName, OriginalFilename, etc.), manifest extraction (UAC requestedExecutionLevel) |
 | Output | Human-readable tables (default) or JSON (`--json`), file output (`-o`) |
 | GUI | egui-based GUI with tabbed views, drag & drop, filters, entropy color-coding, suspicious API highlighting (opt-in via `--features gui`) |
 
@@ -77,11 +78,15 @@ readpe <file.exe> -i           # Imports only
 readpe <file.exe> -s           # Sections only
 readpe <file.exe> -S           # Strings only
 readpe <file.exe> --hashes     # File hashes only
+readpe <file.exe> -r           # Resources only
 readpe <file.exe> --json       # JSON output
 readpe <file.exe> --json | jq '.suspicious_summary'              # Suspicious API summary
 readpe <file.exe> --json | jq '.imports[].functions[] | select(.risk != null)'  # Risky APIs only
 readpe <file.exe> --json | jq '.anomalies'                      # All anomalies
 readpe <file.exe> --json | jq '.anomalies[] | select(.severity == "critical")'  # Critical anomalies only
+readpe <file.exe> --json | jq '.resources'                                     # Resources
+readpe <file.exe> --json | jq '.resources.version_info'                        # Version info
+readpe <file.exe> --json | jq '.resources.manifest'                            # Manifest XML
 readpe <file.exe> -o report.txt  # Write to file
 ```
 
@@ -94,7 +99,7 @@ readpe --gui <file.exe>        # Open file directly in GUI
 
 The GUI provides:
 
-- **Tabbed interface** — File Info, Headers, Sections, Imports, Exports, Strings, Overlay
+- **Tabbed interface** — File Info, Headers, Sections, Imports, Exports, Strings, Overlay, Resources
 - **Drag & drop** — Drop PE files onto the window to analyze
 - **Left sidebar** — Toggle analysis options and re-analyze without restarting
 - **Import filter** — Search API names across DLLs, "Suspicious only" toggle to surface risky APIs
@@ -167,11 +172,42 @@ The GUI provides:
   [INFO] Security: Control Flow Guard (GUARD_CF) is not enabled
   [INFO] Structure: Non-standard section name '.xpack'
   ...
+
+=== Resources (12 entries) ===
+  Version Info:
+    FileVersion:    10.0.19041.1
+    ProductVersion: 10.0.19041.1
+    FileType:       Application (1)
+    FileOS:         0x40004
+    FileFlags:      0x0
+    String Info:
+      CompanyName:             Microsoft Corporation
+      FileDescription:         Windows Notepad
+      OriginalFilename:        NOTEPAD.EXE
+
+  Manifest:
+    <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+    <assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+      <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
+        <security>
+          <requestedPrivileges>
+            <requestedExecutionLevel level="asInvoker" uiAccess="false"/>
+          </requestedPrivileges>
+        </security>
+      </trustInfo>
+    </assembly>
+
+  Type                 Name             Language       Size          RVA
+  -------------------- ---------------- ---------- -------- ------------
+  RT_ICON              #1               en-US          1128 0x00003a000
+  RT_VERSION           #1               en-US           836 0x00003c000
+  RT_MANIFEST          #1               en-US           522 0x00003d000
+  ...
 ```
 
 ## Roadmap
 
-- **v0.2**: Resource directory, Rich header, TLS/Debug directories
+- **v0.2**: Rich header, TLS/Debug directories
 - **v0.3**: .NET metadata, Authenticode signatures, packer detection, entropy histogram
 - **Future**: ELF format support
 

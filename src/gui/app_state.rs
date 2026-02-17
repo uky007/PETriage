@@ -9,6 +9,7 @@ pub enum Tab {
     Exports,
     Strings,
     Overlay,
+    Resources,
 }
 
 impl Tab {
@@ -20,6 +21,7 @@ impl Tab {
         Tab::Exports,
         Tab::Strings,
         Tab::Overlay,
+        Tab::Resources,
     ];
 
     pub fn label(&self) -> &'static str {
@@ -31,6 +33,7 @@ impl Tab {
             Tab::Exports => "Exports",
             Tab::Strings => "Strings",
             Tab::Overlay => "Overlay",
+            Tab::Resources => "Resources",
         }
     }
 }
@@ -44,6 +47,7 @@ pub struct OptionsPanel {
     pub show_strings: bool,
     pub show_hashes: bool,
     pub show_overlay: bool,
+    pub show_resources: bool,
     pub min_str_len: usize,
 }
 
@@ -57,6 +61,7 @@ impl Default for OptionsPanel {
             show_strings: true,
             show_hashes: true,
             show_overlay: true,
+            show_resources: true,
             min_str_len: 4,
         }
     }

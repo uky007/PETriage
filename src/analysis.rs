@@ -17,6 +17,7 @@ pub struct AnalysisOptions {
     pub show_strings: bool,
     pub show_hashes: bool,
     pub show_overlay: bool,
+    pub show_resources: bool,
     pub min_str_len: usize,
     pub file_name: String,
 }
@@ -43,6 +44,8 @@ pub struct AnalysisResult {
     pub hashes: Option<HashInfo>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub overlay: Option<OverlayInfo>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resources: Option<ResourceInfo>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub suspicious_summary: Option<SuspiciousSummary>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -186,6 +189,51 @@ pub struct OverlayInfo {
     pub present: bool,
 }
 
+#[derive(Clone, Debug, Serialize)]
+pub struct ResourceInfo {
+    pub total_entries: usize,
+    pub entries: Vec<ResourceEntry>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version_info: Option<VersionInfo>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub manifest: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ResourceEntry {
+    pub resource_type: String,
+    pub type_id: u32,
+    pub name: String,
+    pub language: u32,
+    pub language_str: String,
+    pub size: u32,
+    pub rva: u32,
+    pub file_offset: usize,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct VersionInfo {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fixed: Option<FixedFileInfo>,
+    pub string_info: Vec<VersionString>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct FixedFileInfo {
+    pub file_version: String,
+    pub product_version: String,
+    pub file_flags: u32,
+    pub file_os: u32,
+    pub file_type: u32,
+    pub file_type_str: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct VersionString {
+    pub key: String,
+    pub value: String,
+}
+
 pub fn analyze(data: &[u8], pe: &PE, opts: &AnalysisOptions) -> AnalysisResult {
     let pe_type = if pe.is_64 { "PE32+ (64-bit)" } else { "PE32 (32-bit)" }.to_string();
 
@@ -249,6 +297,12 @@ pub fn analyze(data: &[u8], pe: &PE, opts: &AnalysisOptions) -> AnalysisResult {
         None
     };
 
+    let resources = if opts.show_resources {
+        parse_resources(data, pe)
+    } else {
+        None
+    };
+
     let suspicious_summary = imports.as_ref().map(|imp| build_suspicious_summary(imp));
 
     let anomalies = Some(detect_anomalies(
@@ -266,6 +320,7 @@ pub fn analyze(data: &[u8], pe: &PE, opts: &AnalysisOptions) -> AnalysisResult {
         strings,
         hashes,
         overlay,
+        resources,
         suspicious_summary,
         anomalies,
     }
@@ -1181,4 +1236,510 @@ fn format_timestamp(timestamp: u32) -> String {
 
 fn is_leap_year(y: i64) -> bool {
     (y % 4 == 0 && y % 100 != 0) || y % 400 == 0
+}
+
+// --- Resource directory parsing ---
+
+fn rva_to_offset(rva: u32, pe: &PE) -> Option<usize> {
+    for sec in &pe.sections {
+        let sec_rva = sec.virtual_address;
+        let sec_size = sec.virtual_size;
+        if rva >= sec_rva && rva < sec_rva + sec_size {
+            let offset = (rva - sec_rva) + sec.pointer_to_raw_data;
+            return Some(offset as usize);
+        }
+    }
+    None
+}
+
+fn read_u16_le(data: &[u8], offset: usize) -> u16 {
+    if offset + 2 > data.len() {
+        return 0;
+    }
+    u16::from_le_bytes([data[offset], data[offset + 1]])
+}
+
+fn read_u32_le(data: &[u8], offset: usize) -> u32 {
+    if offset + 4 > data.len() {
+        return 0;
+    }
+    u32::from_le_bytes([data[offset], data[offset + 1], data[offset + 2], data[offset + 3]])
+}
+
+fn read_utf16_string(data: &[u8], offset: usize, char_count: usize) -> Option<String> {
+    let byte_len = char_count * 2;
+    if offset + byte_len > data.len() {
+        return None;
+    }
+    let chars: Vec<u16> = (0..char_count)
+        .map(|i| read_u16_le(data, offset + i * 2))
+        .collect();
+    Some(String::from_utf16_lossy(&chars))
+}
+
+fn read_utf16_string_until_null(data: &[u8], offset: usize) -> Option<String> {
+    let mut chars = Vec::new();
+    let max_chars = 512;
+    let mut pos = offset;
+    for _ in 0..max_chars {
+        if pos + 2 > data.len() {
+            break;
+        }
+        let ch = read_u16_le(data, pos);
+        if ch == 0 {
+            break;
+        }
+        chars.push(ch);
+        pos += 2;
+    }
+    if chars.is_empty() {
+        return None;
+    }
+    Some(String::from_utf16_lossy(&chars))
+}
+
+fn read_resource_name_string(data: &[u8], base_offset: usize, name_offset: usize) -> Option<String> {
+    let pos = base_offset + name_offset;
+    if pos + 2 > data.len() {
+        return None;
+    }
+    let length = read_u16_le(data, pos) as usize;
+    if length == 0 || length > 256 {
+        return None;
+    }
+    read_utf16_string(data, pos + 2, length)
+}
+
+fn align_up(value: usize, alignment: usize) -> usize {
+    if alignment == 0 {
+        return value;
+    }
+    (value + alignment - 1) & !(alignment - 1)
+}
+
+fn resource_type_name(type_id: u32) -> String {
+    match type_id {
+        1 => "RT_CURSOR".into(),
+        2 => "RT_BITMAP".into(),
+        3 => "RT_ICON".into(),
+        4 => "RT_MENU".into(),
+        5 => "RT_DIALOG".into(),
+        6 => "RT_STRING".into(),
+        7 => "RT_FONTDIR".into(),
+        8 => "RT_FONT".into(),
+        9 => "RT_ACCELERATOR".into(),
+        10 => "RT_RCDATA".into(),
+        11 => "RT_MESSAGETABLE".into(),
+        12 => "RT_GROUP_CURSOR".into(),
+        14 => "RT_GROUP_ICON".into(),
+        16 => "RT_VERSION".into(),
+        17 => "RT_DLGINCLUDE".into(),
+        19 => "RT_PLUGPLAY".into(),
+        20 => "RT_VXD".into(),
+        21 => "RT_ANICURSOR".into(),
+        22 => "RT_ANIICON".into(),
+        23 => "RT_HTML".into(),
+        24 => "RT_MANIFEST".into(),
+        _ => format!("#{}", type_id),
+    }
+}
+
+fn language_id_to_string(lang_id: u32) -> String {
+    let primary = lang_id & 0x3FF;
+    let sub = (lang_id >> 10) & 0x3F;
+    match (primary, sub) {
+        (0, 0) => "Neutral".into(),
+        (0, 1) => "Default".into(),
+        (0x09, 0x01) => "en-US".into(),
+        (0x09, 0x02) => "en-GB".into(),
+        (0x09, 0x03) => "en-AU".into(),
+        (0x09, 0x04) => "en-CA".into(),
+        (0x09, _) => "en".into(),
+        (0x04, 0x01) => "zh-Hans".into(),
+        (0x04, 0x02) => "zh-Hant".into(),
+        (0x04, _) => "zh".into(),
+        (0x11, _) => "ja".into(),
+        (0x12, _) => "ko".into(),
+        (0x07, _) => "de".into(),
+        (0x0C, _) => "fr".into(),
+        (0x0A, _) => "es".into(),
+        (0x10, _) => "it".into(),
+        (0x16, _) => "pt".into(),
+        (0x19, _) => "ru".into(),
+        (0x1D, _) => "sv".into(),
+        (0x13, _) => "nl".into(),
+        (0x15, _) => "pl".into(),
+        (0x1F, _) => "tr".into(),
+        (0x01, _) => "ar".into(),
+        (0x0D, _) => "he".into(),
+        (0x1E, _) => "th".into(),
+        (0x2A, _) => "vi".into(),
+        (0x21, _) => "id".into(),
+        (0x39, _) => "hi".into(),
+        _ => format!("{:#06x}", lang_id),
+    }
+}
+
+fn file_type_str(file_type: u32) -> String {
+    match file_type {
+        0 => "Unknown".into(),
+        1 => "Application".into(),
+        2 => "DLL".into(),
+        3 => "Driver".into(),
+        4 => "Font".into(),
+        5 => "VXD".into(),
+        7 => "Static Library".into(),
+        _ => format!("{:#x}", file_type),
+    }
+}
+
+fn parse_resources(data: &[u8], pe: &PE) -> Option<ResourceInfo> {
+    // Get Data Directory index 2 (Resource Table)
+    let opt = pe.header.optional_header.as_ref()?;
+    let mut rsrc_rva = 0u32;
+    let mut rsrc_size = 0u32;
+    for (idx, (_, dd)) in opt.data_directories.dirs().enumerate() {
+        if idx == 2 {
+            rsrc_rva = dd.virtual_address;
+            rsrc_size = dd.size;
+            break;
+        }
+    }
+    if rsrc_rva == 0 || rsrc_size == 0 {
+        return None;
+    }
+
+    let base_offset = rva_to_offset(rsrc_rva, pe)?;
+    if base_offset >= data.len() {
+        return None;
+    }
+
+    let mut entries = Vec::new();
+    parse_resource_directory(
+        data, pe, base_offset, base_offset,
+        0, 0, String::new(), String::new(), &mut entries,
+    );
+
+    let version_info = extract_version_info(data, pe, &entries);
+    let manifest = extract_manifest(data, &entries);
+
+    Some(ResourceInfo {
+        total_entries: entries.len(),
+        entries,
+        version_info,
+        manifest,
+    })
+}
+
+fn parse_resource_directory(
+    data: &[u8],
+    pe: &PE,
+    base_offset: usize,
+    dir_offset: usize,
+    level: usize,
+    type_id: u32,
+    type_name: String,
+    name: String,
+    entries: &mut Vec<ResourceEntry>,
+) {
+    if level > 3 || entries.len() >= 4096 {
+        return;
+    }
+
+    // IMAGE_RESOURCE_DIRECTORY: 16 bytes
+    if dir_offset + 16 > data.len() {
+        return;
+    }
+    let num_named = read_u16_le(data, dir_offset + 12) as usize;
+    let num_id = read_u16_le(data, dir_offset + 14) as usize;
+    let total = num_named + num_id;
+
+    if total > 1024 {
+        return;
+    }
+
+    let entries_offset = dir_offset + 16;
+
+    for i in 0..total {
+        if entries.len() >= 4096 {
+            return;
+        }
+        let entry_offset = entries_offset + i * 8;
+        if entry_offset + 8 > data.len() {
+            return;
+        }
+
+        let name_or_id = read_u32_le(data, entry_offset);
+        let offset_to_data = read_u32_le(data, entry_offset + 4);
+
+        // Determine name for this level
+        let (current_type_id, current_type_name, current_name) = match level {
+            0 => {
+                // Type level
+                let tid = name_or_id & 0x7FFFFFFF;
+                let tname = if name_or_id & 0x80000000 != 0 {
+                    read_resource_name_string(data, base_offset, (name_or_id & 0x7FFFFFFF) as usize)
+                        .unwrap_or_else(|| resource_type_name(tid))
+                } else {
+                    resource_type_name(tid)
+                };
+                (tid, tname, name.clone())
+            }
+            1 => {
+                // Name/ID level
+                let n = if name_or_id & 0x80000000 != 0 {
+                    read_resource_name_string(data, base_offset, (name_or_id & 0x7FFFFFFF) as usize)
+                        .unwrap_or_else(|| format!("#{}", name_or_id & 0x7FFFFFFF))
+                } else {
+                    format!("#{}", name_or_id)
+                };
+                (type_id, type_name.clone(), n)
+            }
+            _ => {
+                (type_id, type_name.clone(), name.clone())
+            }
+        };
+
+        let is_directory = offset_to_data & 0x80000000 != 0;
+
+        if is_directory {
+            let sub_offset = base_offset + (offset_to_data & 0x7FFFFFFF) as usize;
+            parse_resource_directory(
+                data, pe, base_offset, sub_offset,
+                level + 1, current_type_id, current_type_name, current_name, entries,
+            );
+        } else {
+            // Leaf: IMAGE_RESOURCE_DATA_ENTRY (16 bytes)
+            let data_entry_offset = base_offset + (offset_to_data & 0x7FFFFFFF) as usize;
+            if data_entry_offset + 16 > data.len() {
+                continue;
+            }
+            let data_rva = read_u32_le(data, data_entry_offset);
+            let data_size = read_u32_le(data, data_entry_offset + 4);
+
+            let language = if level == 2 {
+                name_or_id & 0x7FFFFFFF
+            } else {
+                0
+            };
+
+            let file_offset = rva_to_offset(data_rva, pe).unwrap_or(0);
+
+            entries.push(ResourceEntry {
+                resource_type: current_type_name.clone(),
+                type_id: current_type_id,
+                name: current_name.clone(),
+                language,
+                language_str: language_id_to_string(language),
+                size: data_size,
+                rva: data_rva,
+                file_offset,
+            });
+        }
+    }
+}
+
+fn extract_version_info(data: &[u8], pe: &PE, entries: &[ResourceEntry]) -> Option<VersionInfo> {
+    // Find first RT_VERSION entry (type 16)
+    let entry = entries.iter().find(|e| e.type_id == 16)?;
+    let offset = rva_to_offset(entry.rva, pe)?;
+    let size = entry.size as usize;
+    if offset + size > data.len() || size < 6 {
+        return None;
+    }
+    let version_data = &data[offset..offset + size];
+    parse_vs_versioninfo(version_data)
+}
+
+fn parse_vs_versioninfo(data: &[u8]) -> Option<VersionInfo> {
+    if data.len() < 6 {
+        return None;
+    }
+
+    // VS_VERSIONINFO header
+    let _length = read_u16_le(data, 0) as usize;
+    let value_length = read_u16_le(data, 2) as usize;
+    let _type = read_u16_le(data, 4);
+
+    // Key: "VS_VERSION_INFO" (null-terminated UTF-16LE)
+    // Verify signature
+    let key_offset = 6;
+    let expected_key = "VS_VERSION_INFO";
+    if let Some(key) = read_utf16_string_until_null(data, key_offset) {
+        if key != expected_key {
+            return None;
+        }
+    } else {
+        return None;
+    }
+
+    // Skip past key + null terminator
+    let after_key = key_offset + (expected_key.len() + 1) * 2;
+    let after_key_aligned = align_up(after_key, 4);
+
+    // Parse VS_FIXEDFILEINFO if value_length > 0
+    let fixed = if value_length >= 52 && after_key_aligned + 52 <= data.len() {
+        let ffi_offset = after_key_aligned;
+        let signature = read_u32_le(data, ffi_offset);
+        if signature == 0xFEEF04BD {
+            let file_ver_ms = read_u32_le(data, ffi_offset + 8);
+            let file_ver_ls = read_u32_le(data, ffi_offset + 12);
+            let prod_ver_ms = read_u32_le(data, ffi_offset + 16);
+            let prod_ver_ls = read_u32_le(data, ffi_offset + 20);
+            let file_flags = read_u32_le(data, ffi_offset + 28);
+            let file_os = read_u32_le(data, ffi_offset + 32);
+            let file_type = read_u32_le(data, ffi_offset + 36);
+
+            Some(FixedFileInfo {
+                file_version: format!("{}.{}.{}.{}",
+                    file_ver_ms >> 16, file_ver_ms & 0xFFFF,
+                    file_ver_ls >> 16, file_ver_ls & 0xFFFF),
+                product_version: format!("{}.{}.{}.{}",
+                    prod_ver_ms >> 16, prod_ver_ms & 0xFFFF,
+                    prod_ver_ls >> 16, prod_ver_ls & 0xFFFF),
+                file_flags,
+                file_os,
+                file_type,
+                file_type_str: file_type_str(file_type),
+            })
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    // Move past VS_FIXEDFILEINFO
+    let children_offset = if value_length > 0 {
+        align_up(after_key_aligned + value_length, 4)
+    } else {
+        after_key_aligned
+    };
+
+    // Parse children (StringFileInfo / VarFileInfo)
+    let mut string_info = Vec::new();
+    let mut pos = children_offset;
+
+    while pos + 6 < data.len() {
+        let child_length = read_u16_le(data, pos) as usize;
+        if child_length == 0 || pos + child_length > data.len() {
+            break;
+        }
+
+        let _child_value_length = read_u16_le(data, pos + 2);
+        let _child_type = read_u16_le(data, pos + 4);
+
+        if let Some(child_key) = read_utf16_string_until_null(data, pos + 6) {
+            if child_key == "StringFileInfo" {
+                let si_strings = parse_string_file_info(data, pos);
+                string_info.extend(si_strings);
+            }
+        }
+
+        pos = align_up(pos + child_length, 4);
+    }
+
+    Some(VersionInfo {
+        fixed,
+        string_info,
+    })
+}
+
+fn parse_string_file_info(data: &[u8], sfi_offset: usize) -> Vec<VersionString> {
+    let mut result = Vec::new();
+    if sfi_offset + 6 > data.len() {
+        return result;
+    }
+
+    let sfi_length = read_u16_le(data, sfi_offset) as usize;
+    if sfi_length == 0 || sfi_offset + sfi_length > data.len() {
+        return result;
+    }
+
+    // Skip StringFileInfo header: length(2) + value_length(2) + type(2) + key("StringFileInfo"\0 in UTF-16)
+    let key_str = "StringFileInfo";
+    let after_sfi_key = sfi_offset + 6 + (key_str.len() + 1) * 2;
+    let mut table_pos = align_up(after_sfi_key, 4);
+
+    let sfi_end = sfi_offset + sfi_length;
+
+    // Iterate StringTable entries
+    while table_pos + 6 < sfi_end && table_pos + 6 < data.len() {
+        let table_length = read_u16_le(data, table_pos) as usize;
+        if table_length == 0 || table_pos + table_length > data.len() {
+            break;
+        }
+
+        // Skip StringTable header: length(2) + value_length(2) + type(2) + key(8 chars + null in UTF-16)
+        let table_key_offset = table_pos + 6;
+        // Read the table key (e.g., "040904b0") - 8 chars
+        let _table_key = read_utf16_string_until_null(data, table_key_offset);
+        // Find end of table key: skip past it
+        let mut str_pos = table_key_offset;
+        // Skip UTF-16 chars until null
+        let mut key_chars = 0;
+        while str_pos + 2 <= data.len() && key_chars < 64 {
+            let ch = read_u16_le(data, str_pos);
+            str_pos += 2;
+            if ch == 0 {
+                break;
+            }
+            key_chars += 1;
+        }
+        str_pos = align_up(str_pos, 4);
+
+        let table_end = table_pos + table_length;
+
+        // Iterate String entries within this StringTable
+        while str_pos + 6 < table_end && str_pos + 6 < data.len() && result.len() < 64 {
+            let string_length = read_u16_le(data, str_pos) as usize;
+            let string_value_length = read_u16_le(data, str_pos + 2) as usize;
+            let _string_type = read_u16_le(data, str_pos + 4);
+
+            if string_length == 0 || str_pos + string_length > data.len() {
+                break;
+            }
+
+            // Read key
+            if let Some(key) = read_utf16_string_until_null(data, str_pos + 6) {
+                // Skip past key + null
+                let after_string_key = str_pos + 6 + (key.len() + 1) * 2;
+                let value_offset = align_up(after_string_key, 4);
+
+                let value = if string_value_length > 0 && value_offset < data.len() {
+                    // value_length is in WCHARs (including null terminator)
+                    let char_count = string_value_length.saturating_sub(1).min(512);
+                    read_utf16_string(data, value_offset, char_count)
+                        .unwrap_or_default()
+                } else {
+                    String::new()
+                };
+
+                result.push(VersionString { key, value });
+            }
+
+            str_pos = align_up(str_pos + string_length, 4);
+        }
+
+        table_pos = align_up(table_pos + table_length, 4);
+    }
+
+    result
+}
+
+fn extract_manifest(data: &[u8], entries: &[ResourceEntry]) -> Option<String> {
+    // Find first RT_MANIFEST entry (type 24)
+    let entry = entries.iter().find(|e| e.type_id == 24)?;
+    let offset = entry.file_offset;
+    let size = entry.size as usize;
+    if offset == 0 || offset + size > data.len() || size == 0 {
+        return None;
+    }
+    let manifest_data = &data[offset..offset + size];
+    // Manifest is typically UTF-8 XML
+    let text = String::from_utf8_lossy(manifest_data).to_string();
+    if text.is_empty() {
+        return None;
+    }
+    Some(text)
 }

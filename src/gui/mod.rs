@@ -142,6 +142,7 @@ impl ReadpeApp {
                             show_strings: self.options.show_strings,
                             show_hashes: self.options.show_hashes,
                             show_overlay: self.options.show_overlay,
+                            show_resources: self.options.show_resources,
                             min_str_len: self.options.min_str_len,
                             file_name: file_name.clone(),
                         };
@@ -179,6 +180,7 @@ impl ReadpeApp {
                         show_strings: self.options.show_strings,
                         show_hashes: self.options.show_hashes,
                         show_overlay: self.options.show_overlay,
+                        show_resources: self.options.show_resources,
                         min_str_len: self.options.min_str_len,
                         file_name: file_name.clone(),
                     };
@@ -312,6 +314,7 @@ impl eframe::App for ReadpeApp {
                         ui.checkbox(&mut self.options.show_strings, "Strings");
                         ui.checkbox(&mut self.options.show_hashes, "Hashes");
                         ui.checkbox(&mut self.options.show_overlay, "Overlay");
+                        ui.checkbox(&mut self.options.show_resources, "Resources");
                     });
                 ui.add_space(8.0);
 
@@ -427,6 +430,7 @@ impl eframe::App for ReadpeApp {
                                             Tab::Exports => panels::exports::show(ui, &result),
                                             Tab::Strings => panels::strings::show(ui, &result, &mut self.strings_state),
                                             Tab::Overlay => panels::overlay::show(ui, &result),
+                                            Tab::Resources => panels::resources::show(ui, &result),
                                         }
                                     });
                             });
