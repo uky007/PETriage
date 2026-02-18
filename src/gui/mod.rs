@@ -4,7 +4,7 @@ mod panels;
 use std::path::PathBuf;
 
 use eframe::egui;
-use egui::{Color32, CornerRadius, FontId, Margin, Stroke, Vec2};
+use egui::{Color32, ColorImage, CornerRadius, FontId, Margin, Stroke, TextureHandle, Vec2};
 
 use crate::analysis::{self, AnalysisOptions};
 use app_state::{AppState, OptionsPanel, Tab};
@@ -107,12 +107,54 @@ fn setup_style(ctx: &egui::Context) {
     ctx.set_style(style);
 }
 
+struct IconCache {
+    primary_icon: Option<TextureHandle>,
+    all_icons: Vec<(String, Vec<(String, TextureHandle)>)>,
+    populated: bool,
+}
+
+impl Default for IconCache {
+    fn default() -> Self {
+        Self {
+            primary_icon: None,
+            all_icons: Vec::new(),
+            populated: false,
+        }
+    }
+}
+
+fn decode_ico_to_textures(
+    ctx: &egui::Context,
+    ico_bytes: &[u8],
+    prefix: &str,
+) -> Vec<(String, TextureHandle)> {
+    use image::ImageReader;
+    use std::io::Cursor;
+
+    let reader = match ImageReader::new(Cursor::new(ico_bytes)).with_guessed_format() {
+        Ok(r) => r,
+        Err(_) => return Vec::new(),
+    };
+    let dyn_img = match reader.decode() {
+        Ok(img) => img,
+        Err(_) => return Vec::new(),
+    };
+
+    let rgba = dyn_img.to_rgba8();
+    let (w, h) = (rgba.width() as usize, rgba.height() as usize);
+    let label = format!("{prefix}_{w}x{h}");
+    let color_image = ColorImage::from_rgba_unmultiplied([w, h], &rgba);
+    let texture = ctx.load_texture(&label, color_image, egui::TextureOptions::LINEAR);
+    vec![(format!("{w}x{h}"), texture)]
+}
+
 struct ReadpeApp {
     state: AppState,
     options: OptionsPanel,
     current_tab: Tab,
     imports_state: ImportsState,
     strings_state: StringsState,
+    icon_cache: IconCache,
 }
 
 impl Default for ReadpeApp {
@@ -123,6 +165,7 @@ impl Default for ReadpeApp {
             current_tab: Tab::FileInfo,
             imports_state: ImportsState::default(),
             strings_state: StringsState::default(),
+            icon_cache: IconCache::default(),
         }
     }
 }
@@ -149,6 +192,7 @@ impl ReadpeApp {
                         let result = analysis::analyze(&data, &pe, &opts);
                         self.imports_state = ImportsState::default();
                         self.strings_state = StringsState::default();
+                        self.icon_cache = IconCache::default();
                         self.state = AppState::Loaded {
                             file_name,
                             data,
@@ -187,6 +231,7 @@ impl ReadpeApp {
                     let result = analysis::analyze(&data, &pe, &opts);
                     self.imports_state = ImportsState::default();
                     self.strings_state = StringsState::default();
+                    self.icon_cache = IconCache::default();
                     self.state = AppState::Loaded {
                         file_name,
                         data,
@@ -383,6 +428,31 @@ impl eframe::App for ReadpeApp {
                         });
                     }
                     AppState::Loaded { result, .. } => {
+                        // Populate icon cache on first frame after load
+                        if !self.icon_cache.populated {
+                            self.icon_cache.populated = true;
+                            if let Some(ref resources) = result.resources {
+                                for (gi, group) in resources.icon_data.iter().enumerate() {
+                                    let prefix = format!("icon_g{gi}");
+                                    let textures = decode_ico_to_textures(
+                                        ctx,
+                                        &group.ico_bytes,
+                                        &prefix,
+                                    );
+                                    if !textures.is_empty() {
+                                        if self.icon_cache.primary_icon.is_none() {
+                                            self.icon_cache.primary_icon =
+                                                Some(textures[0].1.clone());
+                                        }
+                                        self.icon_cache.all_icons.push((
+                                            group.name.clone(),
+                                            textures,
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+
                         // Tab bar
                         egui::Frame::new()
                             .fill(BG_HEADER)
@@ -423,14 +493,14 @@ impl eframe::App for ReadpeApp {
                                     .auto_shrink([false, false])
                                     .show(ui, |ui| {
                                         match self.current_tab {
-                                            Tab::FileInfo => panels::file_info::show(ui, &result),
+                                            Tab::FileInfo => panels::file_info::show(ui, &result, self.icon_cache.primary_icon.as_ref()),
                                             Tab::Headers => panels::headers::show(ui, &result),
                                             Tab::Sections => panels::sections::show(ui, &result),
                                             Tab::Imports => panels::imports::show(ui, &result, &mut self.imports_state),
                                             Tab::Exports => panels::exports::show(ui, &result),
                                             Tab::Strings => panels::strings::show(ui, &result, &mut self.strings_state),
                                             Tab::Overlay => panels::overlay::show(ui, &result),
-                                            Tab::Resources => panels::resources::show(ui, &result),
+                                            Tab::Resources => panels::resources::show(ui, &result, &self.icon_cache.all_icons),
                                         }
                                     });
                             });

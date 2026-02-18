@@ -21,7 +21,7 @@ These features are the minimum for a useful surface analysis tool. Every serious
 
 These features differentiate a good tool from a basic one. PEStudio, PE-bear, and PPEE all provide these.
 
-13. **Resource Directory**: resource tree parsing (types, names, languages, sizes)
+13. **Resource Directory**: resource tree parsing (types, names, languages, sizes), embedded icon extraction (RT_GROUP_ICON / RT_ICON → ICO reconstruction) and GUI display
 14. **Rich Header**: parsing, XOR key extraction, compiler/linker tool entries (comp.id, product.id, count)
 15. **TLS Directory**: TLS callback detection (critical for malware — callbacks run before main)
 16. **Debug Directory**: PDB path, debug type (CodeView, COFF, etc.), GUID, age
@@ -52,6 +52,7 @@ These features make readpe a comprehensive professional-grade tool.
 | **clap** | CLI argument parsing | Industry standard for Rust CLIs; derive macro for clean code |
 | **md-5, sha1, sha2** | Hash computation | Standard RustCrypto crates |
 | **serde + serde_json** | JSON output | De facto Rust serialization |
+| **image** | ICO/PNG/BMP decoding for icon display (GUI only) | Standard Rust image library; optional dependency gated behind `gui` feature |
 | Manual parsing | Rich header, TLS, debug, resources, overlay | goblin doesn't expose these; straightforward to parse from raw bytes |
 
 **Why goblin over pelite?** goblin is more actively maintained (recent releases, larger community), handles both PE32 and PE32+ uniformly, and is heavily fuzz-tested. pelite has deeper PE coverage but slower release cadence. We supplement goblin's gaps with targeted manual parsing rather than pulling in a second full PE library.

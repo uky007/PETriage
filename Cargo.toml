@@ -6,7 +6,7 @@ description = "Cross-platform PE file surface analysis tool for malware analysts
 license = "Apache-2.0"
 
 [features]
-gui = ["dep:eframe", "dep:egui", "dep:egui_extras", "dep:rfd"]
+gui = ["dep:eframe", "dep:egui", "dep:egui_extras", "dep:rfd", "dep:image"]
 
 [dependencies]
 goblin = "0.9"
@@ -21,3 +21,4 @@ eframe = { version = "0.31", optional = true }
 egui = { version = "0.31", optional = true }
 egui_extras = { version = "0.31", optional = true, features = ["syntect"] }
 rfd = { version = "0.15", optional = true }
+image = { version = "0.25", optional = true, default-features = false, features = ["ico", "png", "bmp"] }

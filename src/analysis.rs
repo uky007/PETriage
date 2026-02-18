@@ -189,6 +189,20 @@ pub struct OverlayInfo {
     pub present: bool,
 }
 
+#[derive(Clone, Debug)]
+pub struct IconGroup {
+    pub name: String,
+    pub ico_bytes: Vec<u8>,
+    pub images: Vec<IconImage>,
+}
+
+#[derive(Clone, Debug)]
+pub struct IconImage {
+    pub width: u32,
+    pub height: u32,
+    pub bit_count: u16,
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct ResourceInfo {
     pub total_entries: usize,
@@ -197,6 +211,8 @@ pub struct ResourceInfo {
     pub version_info: Option<VersionInfo>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub manifest: Option<String>,
+    #[serde(skip)]
+    pub icon_data: Vec<IconGroup>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -1422,12 +1438,14 @@ fn parse_resources(data: &[u8], pe: &PE) -> Option<ResourceInfo> {
 
     let version_info = extract_version_info(data, pe, &entries);
     let manifest = extract_manifest(data, &entries);
+    let icon_data = extract_icons(data, &entries);
 
     Some(ResourceInfo {
         total_entries: entries.len(),
         entries,
         version_info,
         manifest,
+        icon_data,
     })
 }
 
@@ -1742,4 +1760,111 @@ fn extract_manifest(data: &[u8], entries: &[ResourceEntry]) -> Option<String> {
         return None;
     }
     Some(text)
+}
+
+fn extract_icons(data: &[u8], entries: &[ResourceEntry]) -> Vec<IconGroup> {
+    let mut groups = Vec::new();
+    for entry in entries.iter().filter(|e| e.type_id == 14) {
+        if let Some(group) = reconstruct_ico(data, entries, entry) {
+            groups.push(group);
+        }
+    }
+    groups
+}
+
+fn reconstruct_ico(
+    data: &[u8],
+    entries: &[ResourceEntry],
+    group_entry: &ResourceEntry,
+) -> Option<IconGroup> {
+    let offset = group_entry.file_offset;
+    let size = group_entry.size as usize;
+    if offset == 0 || size < 6 || offset + size > data.len() {
+        return None;
+    }
+    let grp = &data[offset..offset + size];
+
+    // GRPICONDIR: reserved(2) + type(2) + count(2)
+    let _reserved = read_u16_le(grp, 0);
+    let img_type = read_u16_le(grp, 2);
+    if img_type != 1 {
+        return None; // not an icon
+    }
+    let count = read_u16_le(grp, 4) as usize;
+    if count == 0 || 6 + count * 14 > size {
+        return None;
+    }
+
+    // Collect RT_ICON data for each entry
+    let mut icon_images = Vec::new();
+    let mut blobs: Vec<Vec<u8>> = Vec::new();
+
+    for i in 0..count {
+        let ge_offset = 6 + i * 14;
+        // GRPICONDIRENTRY: bWidth(1) bHeight(1) bColorCount(1) bReserved(1)
+        //   wPlanes(2) wBitCount(2) dwBytesInRes(4) nID(2)
+        let b_width = grp[ge_offset];
+        let b_height = grp[ge_offset + 1];
+        let bit_count = read_u16_le(grp, ge_offset + 6);
+        let bytes_in_res = read_u32_le(grp, ge_offset + 8);
+        let n_id = read_u16_le(grp, ge_offset + 12);
+
+        let width = if b_width == 0 { 256u32 } else { b_width as u32 };
+        let height = if b_height == 0 { 256u32 } else { b_height as u32 };
+
+        // Find corresponding RT_ICON entry (type 3) with name == "#N"
+        let icon_name = format!("#{}", n_id);
+        let icon_entry = entries.iter().find(|e| e.type_id == 3 && e.name == icon_name);
+        let blob = match icon_entry {
+            Some(ie) => {
+                let ie_off = ie.file_offset;
+                let ie_size = ie.size as usize;
+                if ie_off == 0 || ie_off + ie_size > data.len() {
+                    return None;
+                }
+                data[ie_off..ie_off + ie_size].to_vec()
+            }
+            None => {
+                // Try using bytes_in_res as fallback size hint; skip this entry
+                let _ = bytes_in_res;
+                return None;
+            }
+        };
+
+        icon_images.push(IconImage { width, height, bit_count });
+        blobs.push(blob);
+    }
+
+    // Build ICO file:
+    // ICONDIR (6 bytes) + ICONDIRENTRY[count] (16 each) + image data
+    let header_size = 6 + count * 16;
+    let total_size: usize = header_size + blobs.iter().map(|b| b.len()).sum::<usize>();
+    let mut ico = Vec::with_capacity(total_size);
+
+    // ICONDIR
+    ico.extend_from_slice(&0u16.to_le_bytes()); // reserved
+    ico.extend_from_slice(&1u16.to_le_bytes()); // type = icon
+    ico.extend_from_slice(&(count as u16).to_le_bytes());
+
+    // Compute offsets for each image blob
+    let mut current_offset = header_size as u32;
+    for (i, blob) in blobs.iter().enumerate() {
+        let ge_offset = 6 + i * 14;
+        // Copy first 12 bytes from GRPICONDIRENTRY (bWidth..dwBytesInRes)
+        ico.extend_from_slice(&grp[ge_offset..ge_offset + 12]);
+        // Replace nID(u16) with dwImageOffset(u32)
+        ico.extend_from_slice(&current_offset.to_le_bytes());
+        current_offset += blob.len() as u32;
+    }
+
+    // Append image data blobs
+    for blob in &blobs {
+        ico.extend_from_slice(blob);
+    }
+
+    Some(IconGroup {
+        name: group_entry.name.clone(),
+        ico_bytes: ico,
+        images: icon_images,
+    })
 }

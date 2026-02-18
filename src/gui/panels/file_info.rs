@@ -1,4 +1,4 @@
-use egui::{Color32, Ui};
+use egui::{Color32, TextureHandle, Ui, Vec2};
 
 use crate::analysis::AnalysisResult;
 
@@ -11,26 +11,32 @@ const RISK_LOW: Color32 = Color32::from_rgb(0, 200, 220);
 const BG_DARK: Color32 = Color32::from_rgb(12, 12, 24);
 const BORDER: Color32 = Color32::from_rgb(40, 45, 65);
 
-pub fn show(ui: &mut Ui, result: &AnalysisResult) {
+pub fn show(ui: &mut Ui, result: &AnalysisResult, primary_icon: Option<&TextureHandle>) {
     if let Some(ref info) = result.file_info {
         ui.colored_label(ACCENT, egui::RichText::new("FILE INFO").size(14.0));
         ui.add_space(6.0);
-        egui::Grid::new("file_info_grid")
-            .num_columns(2)
-            .spacing([16.0, 6.0])
-            .show(ui, |ui| {
-                ui.colored_label(LABEL, "File:");
-                ui.monospace(&info.name);
-                ui.end_row();
+        ui.horizontal(|ui| {
+            if let Some(tex) = primary_icon {
+                ui.image(egui::load::SizedTexture::new(tex.id(), Vec2::new(48.0, 48.0)));
+                ui.add_space(8.0);
+            }
+            egui::Grid::new("file_info_grid")
+                .num_columns(2)
+                .spacing([16.0, 6.0])
+                .show(ui, |ui| {
+                    ui.colored_label(LABEL, "File:");
+                    ui.monospace(&info.name);
+                    ui.end_row();
 
-                ui.colored_label(LABEL, "Size:");
-                ui.monospace(format!("{} bytes ({:.2} KB)", info.size, info.size as f64 / 1024.0));
-                ui.end_row();
+                    ui.colored_label(LABEL, "Size:");
+                    ui.monospace(format!("{} bytes ({:.2} KB)", info.size, info.size as f64 / 1024.0));
+                    ui.end_row();
 
-                ui.colored_label(LABEL, "Type:");
-                ui.colored_label(ACCENT_DIM, &info.pe_type);
-                ui.end_row();
-            });
+                    ui.colored_label(LABEL, "Type:");
+                    ui.colored_label(ACCENT_DIM, &info.pe_type);
+                    ui.end_row();
+                });
+        });
     }
 
     if let Some(ref hashes) = result.hashes {

@@ -31,9 +31,9 @@ Malware analysts frequently examine Windows PE files, but the most capable surfa
 | Overlay | Detection of data appended beyond the PE structure |
 | Suspicious API Indicators | Auto-tags ~130 Windows APIs across 12 risk categories (Process Injection, Code Execution, Network, Evasion, etc.) with severity levels (high/medium/low) |
 | Anomaly Detection | 18 heuristic rules detecting packing indicators, W^X violations, missing security features (ASLR/DEP/CFG), timestamp anomalies, structural irregularities, and suspicious API combos |
-| Resource Directory | Resource tree enumeration, VS_VERSIONINFO parsing (FileVersion, CompanyName, OriginalFilename, etc.), manifest extraction (UAC requestedExecutionLevel) |
+| Resource Directory | Resource tree enumeration, VS_VERSIONINFO parsing (FileVersion, CompanyName, OriginalFilename, etc.), manifest extraction (UAC requestedExecutionLevel), embedded icon extraction and display (GUI) |
 | Output | Human-readable tables (default) or JSON (`--json`), file output (`-o`) |
-| GUI | egui-based GUI with tabbed views, drag & drop, filters, entropy color-coding, suspicious API highlighting (opt-in via `--features gui`) |
+| GUI | egui-based GUI with tabbed views, drag & drop, filters, entropy color-coding, suspicious API highlighting, embedded icon display (opt-in via `--features gui`) |
 
 ## Installation
 
@@ -106,6 +106,7 @@ The GUI provides:
 - **String filter** — Filter by text and encoding (ASCII / UTF-16)
 - **Entropy color-coding** — Section entropy highlighted green (<6) / yellow (6–7) / red (7–8)
 - **Suspicious API indicators** — Color-coded severity badges (red/yellow/cyan) on File Info and Imports tabs
+- **Embedded icon display** — Extracts and renders PE embedded icons (RT_GROUP_ICON / RT_ICON); primary icon shown on File Info tab, all icon groups on Resources tab. Useful for identifying malware impersonating legitimate software
 - **Hash copy buttons** — One-click copy of MD5/SHA1/SHA256
 - **Virtual scroll** — Handles tens of thousands of strings without lag
 

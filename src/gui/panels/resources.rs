@@ -1,4 +1,4 @@
-use egui::{Color32, Ui};
+use egui::{Color32, TextureHandle, Ui, Vec2};
 
 use crate::analysis::AnalysisResult;
 
@@ -8,7 +8,7 @@ const LABEL: Color32 = Color32::from_rgb(120, 130, 150);
 const BG_DARK: Color32 = Color32::from_rgb(12, 12, 24);
 const BORDER: Color32 = Color32::from_rgb(40, 45, 65);
 
-pub fn show(ui: &mut Ui, result: &AnalysisResult) {
+pub fn show(ui: &mut Ui, result: &AnalysisResult, icon_groups: &[(String, Vec<(String, TextureHandle)>)]) {
     let resources = match result.resources {
         Some(ref r) => r,
         None => {
@@ -19,6 +19,41 @@ pub fn show(ui: &mut Ui, result: &AnalysisResult) {
 
     ui.colored_label(ACCENT, egui::RichText::new(format!("RESOURCES ({} entries)", resources.total_entries)).size(14.0));
     ui.add_space(6.0);
+
+    // Icons
+    if !icon_groups.is_empty() {
+        let id = ui.make_persistent_id("icons_header");
+        egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, true)
+            .show_header(ui, |ui| {
+                ui.colored_label(ACCENT_DIM, egui::RichText::new("Icons").strong());
+            })
+            .body(|ui| {
+                egui::Frame::new()
+                    .fill(BG_DARK)
+                    .corner_radius(egui::CornerRadius::same(4))
+                    .stroke(egui::Stroke::new(0.5, BORDER))
+                    .inner_margin(egui::Margin::same(8))
+                    .show(ui, |ui| {
+                        for (group_name, textures) in icon_groups {
+                            ui.colored_label(LABEL, format!("Group {group_name}"));
+                            ui.add_space(4.0);
+                            ui.horizontal_wrapped(|ui| {
+                                for (size_label, tex) in textures {
+                                    ui.vertical(|ui| {
+                                        ui.image(egui::load::SizedTexture::new(
+                                            tex.id(),
+                                            Vec2::new(48.0, 48.0),
+                                        ));
+                                        ui.colored_label(LABEL, size_label);
+                                    });
+                                }
+                            });
+                            ui.add_space(4.0);
+                        }
+                    });
+            });
+        ui.add_space(8.0);
+    }
 
     // Version Info
     if let Some(ref ver) = resources.version_info {
