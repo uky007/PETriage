@@ -1,46 +1,50 @@
-# readpe Feature Scope
+# petriage Feature Scope
 
-## MVP (v0.1) - Must Have
+## MVP (v0.1) — Must Have
 
-These features are the minimum for a useful surface analysis tool. Every serious PE analysis tool provides these, and without them readpe would not be competitive.
+These features are the minimum for a useful surface analysis tool. Every serious PE analysis tool provides these, and without them petriage would not be competitive.
 
-1. **File Info**: file size, file type detection, file hashes (MD5, SHA1, SHA256, imphash)
-2. **DOS Header**: full DOS header parsing (e_magic, e_lfanew, all fields)
-3. **PE Signature**: PE signature validation ("PE\0\0")
-4. **COFF/File Header**: machine type, number of sections, timestamp, characteristics
-5. **Optional Header**: magic (PE32/PE32+), entry point, image base, subsystem, DLL characteristics, data directory count
-6. **Data Directories**: list all 16 data directories with RVA and size
-7. **Section Headers**: name, virtual/raw size, virtual/raw address, characteristics, per-section entropy
-8. **Import Table**: DLL names and imported function names (by name and by ordinal)
-9. **Export Table**: exported function names, ordinals, forwarded exports
-10. **Strings**: ASCII and Unicode string extraction (configurable min length, default 4)
-11. **Overlay Detection**: detect data appended after the last section (offset and size)
-12. **Output Formats**: human-readable table output (default) + JSON output (`--json`)
+1. **File Info**: file size, file type detection, file hashes (MD5, SHA1, SHA256) — **implemented**
+   - Note: imphash is **not yet implemented** (requires ordered import hash computation)
+2. **DOS Header**: e_magic, e_lfanew — **implemented** (minimal fields, not full 64-byte DOS header)
+3. **PE Signature**: PE signature validation ("PE\0\0") — **implemented** (via goblin)
+4. **COFF/File Header**: machine type, number of sections, timestamp, characteristics — **implemented**
+5. **Optional Header**: magic (PE32/PE32+), entry point, image base, subsystem, DLL characteristics, data directory count — **implemented**
+6. **Data Directories**: list all 16 data directories with RVA and size — **implemented**
+7. **Section Headers**: name, virtual/raw size, virtual/raw address, characteristics, per-section entropy — **implemented**
+8. **Import Table**: DLL names and imported function names (by name) — **implemented**
+   - Note: import by ordinal display is deferred to goblin's output
+9. **Export Table**: exported function names, ordinals, RVAs — **implemented** (ordinal_base correction applied)
+   - Note: forwarded exports detection is **not yet implemented**
+10. **Strings**: ASCII and UTF-16LE string extraction (configurable min length, default 4, max 100K strings) — **implemented**
+11. **Overlay Detection**: detect data appended after the last section (offset and size) — **implemented**
+12. **Output Formats**: human-readable table output (default) + JSON output (`--json`) + file output (`-o`) — **implemented**
 
-## v0.2 - Important
+## v0.2 — Important
 
 These features differentiate a good tool from a basic one. PEStudio, PE-bear, and PPEE all provide these.
 
-13. **Resource Directory**: resource tree parsing (types, names, languages, sizes), embedded icon extraction (RT_GROUP_ICON / RT_ICON → ICO reconstruction) and GUI display
-14. **Rich Header**: parsing, XOR key extraction, compiler/linker tool entries (comp.id, product.id, count)
-15. **TLS Directory**: TLS callback detection (critical for malware — callbacks run before main)
-16. **Debug Directory**: PDB path, debug type (CodeView, COFF, etc.), GUID, age
-17. **Suspicious API Indicators**: flag known suspicious imports (VirtualAlloc, CreateRemoteThread, WriteProcessMemory, NtUnmapViewOfSection, etc.) with risk categorization
-18. **Anomaly Detection**: flag structural anomalies (mismatched checksums, suspicious section names, entry point outside code section, zero-size sections, abnormal entropy, etc.)
-19. **Load Config Directory**: SEH handler table, CFG function table, guard flags
+13. **Resource Directory**: resource tree parsing (types, names, languages, sizes), VS_VERSIONINFO parsing, manifest extraction, embedded icon extraction (RT_GROUP_ICON / RT_ICON → ICO reconstruction) and GUI display — **implemented**
+14. **Rich Header**: parsing, XOR key extraction, compiler/linker tool entries (comp.id, product.id, count) — **not yet implemented**
+15. **TLS Directory**: TLS callback detection (critical for malware — callbacks run before main) — **not yet implemented**
+16. **Debug Directory**: PDB path, debug type (CodeView, COFF, etc.), GUID, age — **not yet implemented**
+17. **Suspicious API Indicators**: ~130 APIs across 12 categories with 3-level severity (high/medium/low), CLI color-coding, GUI filtering — **implemented**
+18. **Anomaly Detection**: 18 heuristic rules with `rule_id`/`evidence`/`threshold` for JSON traceability. Covers packing (entropy, W^X, expansion ratio), security features (ASLR/DEP/CFG/SEH), timestamp anomalies, structural issues, suspicious API combos. All arithmetic uses checked/float operations to prevent overflow panics on crafted PEs — **implemented**
+19. **Load Config Directory**: SEH handler table, CFG function table, guard flags — **not yet implemented**
+20. **TUI Hex Viewer**: interactive terminal hex viewer with PE region navigation, alternate screen mode (`--features tui`, `-x`/`--view` flag) — **implemented**
 
-## v0.3 - Advanced
+## v0.3 — Advanced
 
-These features make readpe a comprehensive professional-grade tool.
+These features make petriage a comprehensive professional-grade tool.
 
-20. **.NET Metadata**: CLR header, metadata tables, streams, managed entry point
-21. **Authenticode**: digital signature parsing and certificate chain extraction (not full verification — that requires Windows CryptoAPI)
-22. **Bound/Delay Imports**: parsing and display
-23. **Relocation Table**: parsing (base relocation entries)
-24. **Entropy Histogram**: per-section and overall entropy with visual bar chart in terminal
-25. **Packer Detection**: signature-based packer/compiler identification (PEiD-compatible signatures)
-26. **Exception Directory**: exception handler table (x64)
-27. **Certificate Table**: raw certificate data extraction
+21. **.NET Metadata**: CLR header, metadata tables, streams, managed entry point
+22. **Authenticode**: digital signature parsing and certificate chain extraction (not full verification — that requires Windows CryptoAPI)
+23. **Bound/Delay Imports**: parsing and display
+24. **Relocation Table**: parsing (base relocation entries)
+25. **Entropy Histogram**: per-section and overall entropy with visual bar chart in terminal
+26. **Packer Detection**: signature-based packer/compiler identification (PEiD-compatible signatures)
+27. **Exception Directory**: exception handler table (x64)
+28. **Certificate Table**: raw certificate data extraction
 
 ## Technical Approach
 
@@ -53,6 +57,8 @@ These features make readpe a comprehensive professional-grade tool.
 | **md-5, sha1, sha2** | Hash computation | Standard RustCrypto crates |
 | **serde + serde_json** | JSON output | De facto Rust serialization |
 | **image** | ICO/PNG/BMP decoding for icon display (GUI only) | Standard Rust image library; optional dependency gated behind `gui` feature |
+| **ratatui** | TUI hex viewer (optional, `tui` feature) | Terminal UI framework; alternate screen mode for interactive PE browsing |
+| **crossterm** | Terminal I/O for TUI (optional, `tui` feature) | Cross-platform terminal manipulation |
 | Manual parsing | Rich header, TLS, debug, resources, overlay | goblin doesn't expose these; straightforward to parse from raw bytes |
 
 **Why goblin over pelite?** goblin is more actively maintained (recent releases, larger community), handles both PE32 and PE32+ uniformly, and is heavily fuzz-tested. pelite has deeper PE coverage but slower release cadence. We supplement goblin's gaps with targeted manual parsing rather than pulling in a second full PE library.
@@ -60,39 +66,45 @@ These features make readpe a comprehensive professional-grade tool.
 ### Architecture
 
 ```
-readpe <file> [OPTIONS]
+petriage <file> [OPTIONS]
 
 Options:
-  -a, --all           Show all information (default)
-  -H, --headers       Show headers only (DOS + COFF + Optional)
-  -i, --imports       Show imports
-  -e, --exports       Show exports
-  -s, --sections      Show sections
-  -S, --strings       Show strings
-  -r, --resources     Show resources
-  --hashes            Show file hashes
-  --json              Output as JSON
-  --min-length <N>    Minimum string length (default: 4)
-  -o, --output <FILE> Write output to file
-  -h, --help          Print help
-  -V, --version       Print version
+  -a, --all              Show all information (default)
+  -H, --headers          Show headers only (DOS + COFF + Optional)
+  -i, --imports          Show imports
+  -e, --exports          Show exports
+  -s, --sections         Show sections
+  -S, --strings          Show strings
+  -r, --resources        Show resources
+  --hashes               Show file hashes
+  --overlay              Show overlay information
+  --json                 Output as JSON
+  --min-str-len <N>      Minimum string length (default: 4)
+  -o, --output <FILE>    Write output to file
+  -x, --view             Launch TUI hex viewer (--features tui)
+  --gui                  Launch GUI mode (--features gui)
+  -h, --help             Print help
+  -V, --version          Print version
 ```
 
-### Module Structure
+### Module Structure (actual)
 
 ```
 src/
-  main.rs           # CLI entry point and argument parsing
-  analysis.rs       # PE analysis logic (headers, sections, dirs)
-  strings.rs        # String extraction from raw bytes
-  hashes.rs         # File and import hash computation
-  entropy.rs        # Shannon entropy calculation
-  rich_header.rs    # Rich header parsing (manual)
-  resources.rs      # Resource directory parsing (manual)
-  overlay.rs        # Overlay detection
-  indicators.rs     # Suspicious API flagging
+  main.rs           # CLI entry point, argument parsing, exit code contract
+  analysis.rs       # All PE analysis logic in one module:
+                    #   headers, sections, imports, exports, strings,
+                    #   hashes, entropy, overlay, resources (tree/version/manifest/icons),
+                    #   suspicious API indicators (~130 APIs, 12 categories),
+                    #   anomaly detection (18 rules with rule_id/evidence/threshold)
   output.rs         # Human-readable and JSON formatting
+  gui/mod.rs        # egui GUI entry point (optional, --features gui)
+  gui/app_state.rs  # GUI application state
+  gui/panels/       # GUI tab panels (file_info, headers, sections, imports, etc.)
+  tui.rs            # ratatui TUI hex viewer (optional, --features tui)
 ```
+
+> Note: The original plan split logic across multiple files (strings.rs, hashes.rs, etc.) but the actual implementation consolidates everything in `analysis.rs` for simplicity. This may be refactored as the codebase grows.
 
 ### Cross-Compilation
 
@@ -107,7 +119,7 @@ All targets produce static binaries with zero runtime dependencies.
 
 ### Design Principles
 
-1. **No execution**: readpe never executes or loads the PE — pure static/surface analysis
+1. **No execution**: petriage never executes or loads the PE — pure static/surface analysis
 2. **Robust parsing**: Handle malformed and truncated PEs gracefully (common in malware)
 3. **Fast**: Process files in milliseconds, suitable for batch analysis of thousands of samples
 4. **Offline**: No network calls by default (no VirusTotal, no update checks)

@@ -1,5 +1,5 @@
 [package]
-name = "readpe"
+name = "petriage"
 version = "0.1.0"
 edition = "2024"
 description = "Cross-platform PE file surface analysis tool for malware analysts"
@@ -7,6 +7,7 @@ license = "Apache-2.0"
 
 [features]
 gui = ["dep:eframe", "dep:egui", "dep:egui_extras", "dep:rfd", "dep:image"]
+tui = ["dep:ratatui", "dep:crossterm"]
 
 [dependencies]
 goblin = "0.9"
@@ -22,3 +23,5 @@ egui = { version = "0.31", optional = true }
 egui_extras = { version = "0.31", optional = true, features = ["syntect"] }
 rfd = { version = "0.15", optional = true }
 image = { version = "0.25", optional = true, default-features = false, features = ["ico", "png", "bmp"] }
+ratatui = { version = "0.29", optional = true }
+crossterm = { version = "0.28", optional = true }

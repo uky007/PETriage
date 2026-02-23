@@ -156,9 +156,14 @@ pub struct CategoryCount {
 
 #[derive(Clone, Debug, Serialize)]
 pub struct Anomaly {
+    pub rule_id: String,
     pub category: String,
     pub severity: String,
     pub description: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub threshold: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -362,69 +367,87 @@ fn detect_anomalies(
             // Rule 1: Entropy > 7.0 — likely encrypted or packed
             if sec.entropy > 7.0 {
                 anomalies.push(Anomaly {
+                    rule_id: "PACK-001".into(),
                     category: "Packing".into(),
                     severity: "critical".into(),
                     description: format!(
                         "Section '{}' has very high entropy ({:.4}) — likely encrypted or packed",
                         sec.name, sec.entropy
                     ),
+                    evidence: Some(format!("entropy={:.4}", sec.entropy)),
+                    threshold: Some("7.0".into()),
                 });
             }
             // Rule 2: Entropy > 6.5 and executable
             else if sec.entropy > 6.5 && sec.characteristics & 0x20000000 != 0 {
                 anomalies.push(Anomaly {
+                    rule_id: "PACK-002".into(),
                     category: "Packing".into(),
                     severity: "warning".into(),
                     description: format!(
                         "Executable section '{}' has high entropy ({:.4})",
                         sec.name, sec.entropy
                     ),
+                    evidence: Some(format!("entropy={:.4}, characteristics={:#x}", sec.entropy, sec.characteristics)),
+                    threshold: Some("6.5".into()),
                 });
             }
 
             // Rule 3: raw_size=0, virtual_size > 0
             if sec.raw_size == 0 && sec.virtual_size > 0 {
                 anomalies.push(Anomaly {
+                    rule_id: "PACK-003".into(),
                     category: "Packing".into(),
                     severity: "warning".into(),
                     description: format!(
                         "Section '{}' has raw_size=0 but virtual_size={:#x} — runtime unpacking suspected",
                         sec.name, sec.virtual_size
                     ),
+                    evidence: Some(format!("raw_size=0, virtual_size={:#x}", sec.virtual_size)),
+                    threshold: None,
                 });
             }
 
             // Rule 4: virtual_size > 10 * raw_size
-            if sec.raw_size > 0 && sec.virtual_size > sec.raw_size * 10 {
+            let ratio = if sec.raw_size > 0 { sec.virtual_size as f64 / sec.raw_size as f64 } else { 0.0 };
+            if sec.raw_size > 0 && ratio > 10.0 {
                 anomalies.push(Anomaly {
+                    rule_id: "PACK-004".into(),
                     category: "Packing".into(),
                     severity: "warning".into(),
                     description: format!(
                         "Section '{}' has abnormal expansion ratio (virtual={:#x}, raw={:#x}, ratio={:.1}x)",
-                        sec.name, sec.virtual_size, sec.raw_size,
-                        sec.virtual_size as f64 / sec.raw_size as f64
+                        sec.name, sec.virtual_size, sec.raw_size, ratio
                     ),
+                    evidence: Some(format!("ratio={:.1}x", ratio)),
+                    threshold: Some("10.0x".into()),
                 });
             }
 
             // Rule 5: W^X violation (Write + Execute)
             if sec.characteristics & 0x80000000 != 0 && sec.characteristics & 0x20000000 != 0 {
                 anomalies.push(Anomaly {
+                    rule_id: "CODE-001".into(),
                     category: "Code Integrity".into(),
                     severity: "critical".into(),
                     description: format!(
                         "Section '{}' is both writable and executable (W^X violation)",
                         sec.name
                     ),
+                    evidence: Some(format!("characteristics={:#x}", sec.characteristics)),
+                    threshold: None,
                 });
             }
 
             // Rule 15: Non-standard section name
             if !standard_names.contains(&sec.name.as_str()) {
                 anomalies.push(Anomaly {
+                    rule_id: "STRUCT-003".into(),
                     category: "Structure".into(),
                     severity: "info".into(),
                     description: format!("Non-standard section name '{}'", sec.name),
+                    evidence: Some(sec.name.clone()),
+                    threshold: None,
                 });
             }
         }
@@ -441,12 +464,15 @@ fn detect_anomalies(
                 if let Some(sec) = ep_section {
                     if sec.name != ".text" {
                         anomalies.push(Anomaly {
+                            rule_id: "CODE-002".into(),
                             category: "Code Integrity".into(),
                             severity: "warning".into(),
                             description: format!(
                                 "Entry point ({:#x}) is in section '{}' instead of '.text'",
                                 ep, sec.name
                             ),
+                            evidence: Some(format!("entry_point={:#x}, section={}", ep, sec.name)),
+                            threshold: None,
                         });
                     }
                 }
@@ -456,15 +482,21 @@ fn detect_anomalies(
         // Rule 16: Section count 0 or >= 10
         if sections.is_empty() {
             anomalies.push(Anomaly {
+                rule_id: "STRUCT-004".into(),
                 category: "Structure".into(),
                 severity: "warning".into(),
                 description: "PE has no sections".into(),
+                evidence: Some("section_count=0".into()),
+                threshold: None,
             });
         } else if sections.len() >= 10 {
             anomalies.push(Anomaly {
+                rule_id: "STRUCT-004".into(),
                 category: "Structure".into(),
                 severity: "warning".into(),
                 description: format!("Unusual number of sections ({})", sections.len()),
+                evidence: Some(format!("section_count={}", sections.len())),
+                threshold: Some("10".into()),
             });
         }
     }
@@ -476,36 +508,48 @@ fn detect_anomalies(
         // Rule 7: ASLR disabled
         if dll_chars & 0x0040 == 0 {
             anomalies.push(Anomaly {
+                rule_id: "SEC-001".into(),
                 category: "Security".into(),
                 severity: "warning".into(),
                 description: "ASLR (DYNAMIC_BASE) is disabled".into(),
+                evidence: Some(format!("dll_characteristics={:#06x}", dll_chars)),
+                threshold: None,
             });
         }
 
         // Rule 8: DEP disabled
         if dll_chars & 0x0100 == 0 {
             anomalies.push(Anomaly {
+                rule_id: "SEC-002".into(),
                 category: "Security".into(),
                 severity: "warning".into(),
                 description: "DEP (NX_COMPAT) is disabled".into(),
+                evidence: Some(format!("dll_characteristics={:#06x}", dll_chars)),
+                threshold: None,
             });
         }
 
         // Rule 9: CFG disabled
         if dll_chars & 0x4000 == 0 {
             anomalies.push(Anomaly {
+                rule_id: "SEC-003".into(),
                 category: "Security".into(),
                 severity: "info".into(),
                 description: "Control Flow Guard (GUARD_CF) is not enabled".into(),
+                evidence: Some(format!("dll_characteristics={:#06x}", dll_chars)),
+                threshold: None,
             });
         }
 
         // Rule 10: NO_SEH set
         if dll_chars & 0x0400 != 0 {
             anomalies.push(Anomaly {
+                rule_id: "SEC-004".into(),
                 category: "Security".into(),
                 severity: "info".into(),
                 description: "NO_SEH is set — SEH-based protections are disabled".into(),
+                evidence: Some(format!("dll_characteristics={:#06x}", dll_chars)),
+                threshold: None,
             });
         }
     }
@@ -516,9 +560,12 @@ fn detect_anomalies(
         if ts == 0 {
             // Rule 13: Timestamp is 0
             anomalies.push(Anomaly {
+                rule_id: "TIME-003".into(),
                 category: "Timestamp".into(),
                 severity: "info".into(),
                 description: "Timestamp is 0 (stripped or not set)".into(),
+                evidence: Some("time_date_stamp=0".into()),
+                threshold: None,
             });
         } else {
             // Rule 11: Timestamp in future
@@ -528,23 +575,29 @@ fn detect_anomalies(
                 .unwrap_or(0);
             if now > 0 && ts > now {
                 anomalies.push(Anomaly {
+                    rule_id: "TIME-001".into(),
                     category: "Timestamp".into(),
                     severity: "warning".into(),
                     description: format!(
                         "Timestamp ({}) is in the future", coff.time_date_stamp_str
                     ),
+                    evidence: Some(format!("time_date_stamp={:#x} ({})", ts, coff.time_date_stamp_str)),
+                    threshold: Some(format!("now={:#x}", now)),
                 });
             }
 
             // Rule 12: Timestamp before 2000 (946684800 = 2000-01-01 UTC)
             if ts < 946_684_800 {
                 anomalies.push(Anomaly {
+                    rule_id: "TIME-002".into(),
                     category: "Timestamp".into(),
                     severity: "warning".into(),
                     description: format!(
                         "Timestamp ({}) is before year 2000 — possible forgery",
                         coff.time_date_stamp_str
                     ),
+                    evidence: Some(format!("time_date_stamp={:#x} ({})", ts, coff.time_date_stamp_str)),
+                    threshold: Some("946684800 (2000-01-01)".into()),
                 });
             }
         }
@@ -554,12 +607,15 @@ fn detect_anomalies(
     if let Some(overlay) = overlay {
         if overlay.present {
             anomalies.push(Anomaly {
+                rule_id: "STRUCT-002".into(),
                 category: "Structure".into(),
                 severity: "warning".into(),
                 description: format!(
                     "Overlay data detected ({} bytes at offset {:#x})",
                     overlay.size, overlay.offset
                 ),
+                evidence: Some(format!("offset={:#x}, size={}", overlay.offset, overlay.size)),
+                threshold: None,
             });
         }
     }
@@ -573,18 +629,24 @@ fn detect_anomalies(
         // Rule 17: Process Injection + Evasion
         if has_category("Process Injection") && has_category("Evasion") {
             anomalies.push(Anomaly {
+                rule_id: "COMBO-001".into(),
                 category: "Suspicious Combo".into(),
                 severity: "critical".into(),
                 description: "Process Injection + Evasion APIs both present — possible code injection technique".into(),
+                evidence: Some("categories=[Process Injection, Evasion]".into()),
+                threshold: None,
             });
         }
 
         // Rule 18: Network + Crypto
         if has_category("Network") && has_category("Crypto") {
             anomalies.push(Anomaly {
+                rule_id: "COMBO-002".into(),
                 category: "Suspicious Combo".into(),
                 severity: "warning".into(),
                 description: "Network + Crypto APIs both present — possible encrypted C2 communication".into(),
+                evidence: Some("categories=[Network, Crypto]".into()),
+                threshold: None,
             });
         }
     }
@@ -1049,14 +1111,28 @@ fn build_suspicious_summary(imports: &[ImportEntry]) -> SuspiciousSummary {
 }
 
 fn parse_exports(pe: &PE) -> Vec<ExportEntry> {
+    let ordinal_base = pe.export_data
+        .as_ref()
+        .map(|d| d.export_directory_table.ordinal_base as usize)
+        .unwrap_or(0);
+
+    // goblin exposes each Export with an offset (file offset) and rva.
+    // The ordinal for a named export is looked up via the ordinal table
+    // (name_index -> ordinal_table[name_index] + ordinal_base).
+    // goblin's export list is ordered by address table index, so
+    // ordinal = ordinal_base + index is correct for the address table.
+    // However, there is no per-Export ordinal field in goblin, so we
+    // use this as the best available approximation.
     pe.exports.iter().enumerate().map(|(i, exp)| {
         ExportEntry {
             name: exp.name.unwrap_or("(ordinal only)").to_string(),
-            ordinal: i,
+            ordinal: ordinal_base.saturating_add(i),
             rva: exp.rva,
         }
     }).collect()
 }
+
+const MAX_STRINGS: usize = 100_000;
 
 fn extract_strings(data: &[u8], min_len: usize) -> Vec<StringEntry> {
     let mut strings = Vec::new();
@@ -1077,6 +1153,10 @@ fn extract_strings(data: &[u8], min_len: usize) -> Vec<StringEntry> {
                     value: String::from_utf8_lossy(&current).to_string(),
                     encoding: "ASCII".to_string(),
                 });
+                if strings.len() >= MAX_STRINGS {
+                    strings.sort_by_key(|s| s.offset);
+                    return strings;
+                }
             }
             current.clear();
         }
@@ -1087,6 +1167,11 @@ fn extract_strings(data: &[u8], min_len: usize) -> Vec<StringEntry> {
             value: String::from_utf8_lossy(&current).to_string(),
             encoding: "ASCII".to_string(),
         });
+    }
+
+    if strings.len() >= MAX_STRINGS {
+        strings.sort_by_key(|s| s.offset);
+        return strings;
     }
 
     // UTF-16LE strings
@@ -1113,13 +1198,17 @@ fn extract_strings(data: &[u8], min_len: usize) -> Vec<StringEntry> {
                             value: s,
                             encoding: "UTF-16LE".to_string(),
                         });
+                        if strings.len() >= MAX_STRINGS {
+                            strings.sort_by_key(|s| s.offset);
+                            return strings;
+                        }
                     }
                 }
                 current_u16.clear();
             }
             i += 2;
         }
-        if current_u16.len() >= min_len {
+        if current_u16.len() >= min_len && strings.len() < MAX_STRINGS {
             let s: String = current_u16.iter()
                 .filter_map(|&c| char::from_u32(c as u32))
                 .collect();
@@ -1166,7 +1255,8 @@ fn compute_hashes(data: &[u8]) -> HashInfo {
 fn detect_overlay(data: &[u8], pe: &PE) -> OverlayInfo {
     // The overlay starts after the last section's raw data
     let end_of_pe = pe.sections.iter()
-        .map(|s| (s.pointer_to_raw_data + s.size_of_raw_data) as usize)
+        .filter_map(|s| s.pointer_to_raw_data.checked_add(s.size_of_raw_data))
+        .map(|v| v as usize)
         .max()
         .unwrap_or(0);
 
@@ -1256,13 +1346,22 @@ fn is_leap_year(y: i64) -> bool {
 
 // --- Resource directory parsing ---
 
-fn rva_to_offset(rva: u32, pe: &PE) -> Option<usize> {
+fn rva_to_offset(rva: u32, pe: &PE, data_len: usize) -> Option<usize> {
     for sec in &pe.sections {
         let sec_rva = sec.virtual_address;
-        let sec_size = sec.virtual_size;
-        if rva >= sec_rva && rva < sec_rva + sec_size {
-            let offset = (rva - sec_rva) + sec.pointer_to_raw_data;
-            return Some(offset as usize);
+        let sec_end = match sec_rva.checked_add(sec.virtual_size) {
+            Some(v) => v,
+            None => continue, // skip this section on overflow
+        };
+        if rva >= sec_rva && rva < sec_end {
+            let delta = rva - sec_rva;
+            let offset = match sec.pointer_to_raw_data.checked_add(delta) {
+                Some(v) => v as usize,
+                None => continue,
+            };
+            if offset < data_len {
+                return Some(offset);
+            }
         }
     }
     None
@@ -1425,7 +1524,7 @@ fn parse_resources(data: &[u8], pe: &PE) -> Option<ResourceInfo> {
         return None;
     }
 
-    let base_offset = rva_to_offset(rsrc_rva, pe)?;
+    let base_offset = rva_to_offset(rsrc_rva, pe, data.len())?;
     if base_offset >= data.len() {
         return None;
     }
@@ -1541,7 +1640,7 @@ fn parse_resource_directory(
                 0
             };
 
-            let file_offset = rva_to_offset(data_rva, pe).unwrap_or(0);
+            let file_offset = rva_to_offset(data_rva, pe, data.len()).unwrap_or(0);
 
             entries.push(ResourceEntry {
                 resource_type: current_type_name.clone(),
@@ -1560,7 +1659,7 @@ fn parse_resource_directory(
 fn extract_version_info(data: &[u8], pe: &PE, entries: &[ResourceEntry]) -> Option<VersionInfo> {
     // Find first RT_VERSION entry (type 16)
     let entry = entries.iter().find(|e| e.type_id == 16)?;
-    let offset = rva_to_offset(entry.rva, pe)?;
+    let offset = rva_to_offset(entry.rva, pe, data.len())?;
     let size = entry.size as usize;
     if offset + size > data.len() || size < 6 {
         return None;

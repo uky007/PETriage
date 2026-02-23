@@ -11,9 +11,9 @@ pub fn print_banner() {
   {}  {}
   {}
 "#,
-        "╦═╗╔═╗╔═╗╔╦╗╔═╗╔═╗".cyan().bold(),
-        "╠╦╝║╣ ╠═╣ ║║╠═╝║╣".cyan().bold(),
-        "╩╚═╚═╝╩ ╩═╩╝╩  ╚═╝".cyan().bold(),
+        "╔═╗╔═╗╔╦╗╦═╗╦╔═╗╔═╗╔═╗".cyan().bold(),
+        "╠═╝║╣  ║ ╠╦╝║╠═╣║ ╦║╣ ".cyan().bold(),
+        "╩  ╚═╝ ╩ ╩╚═╩╩ ╩╚═╝╚═╝".cyan().bold(),
         format!("v{version}").white().dimmed(),
         "PE file surface analysis".white().dimmed(),
     );
@@ -174,7 +174,7 @@ pub fn format_text(result: &AnalysisResult) -> String {
                     "info" => format!("{}", "[INFO]".cyan()),
                     _ => String::new(),
                 };
-                out.push_str(&format!("  {} {}: {}\n", tag, anomaly.category, anomaly.description));
+                out.push_str(&format!("  {} {} {}: {}\n", tag, format!("[{}]", anomaly.rule_id).dimmed(), anomaly.category, anomaly.description));
             }
             out.push('\n');
         }

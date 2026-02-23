@@ -2,6 +2,8 @@ mod analysis;
 #[cfg(feature = "gui")]
 mod gui;
 mod output;
+#[cfg(feature = "tui")]
+mod tui;
 
 use std::fs;
 use std::path::PathBuf;
@@ -10,7 +12,7 @@ use std::process;
 use clap::Parser;
 
 #[derive(Parser)]
-#[command(name = "readpe", version, about = "Cross-platform PE file surface analysis tool")]
+#[command(name = "petriage", version, about = "Cross-platform PE file surface analysis tool")]
 struct Cli {
     /// PE file to analyze
     file: Option<PathBuf>,
@@ -63,12 +65,21 @@ struct Cli {
     #[arg(short = 'o', long)]
     output: Option<PathBuf>,
 
+    /// Launch interactive TUI hex viewer
+    #[cfg(feature = "tui")]
+    #[arg(short = 'x', long = "view")]
+    view: bool,
+
     /// Launch GUI mode
     #[cfg(feature = "gui")]
     #[arg(long)]
     gui: bool,
 }
 
+// Exit codes:
+//   0 — success
+//   1 — input error (file not found, read failure, invalid PE)
+//   2 — output error (write failure)
 fn main() {
     let cli = Cli::parse();
 
@@ -78,34 +89,44 @@ fn main() {
         return;
     }
 
-    if !cli.json {
+    #[cfg(feature = "tui")]
+    let want_tui = cli.view;
+    #[cfg(not(feature = "tui"))]
+    let want_tui = false;
+
+    if !want_tui && !cli.json {
         output::print_banner();
     }
 
     let file = match cli.file {
         Some(f) => f,
         None => {
-            eprintln!("Error: PE file path is required for CLI mode");
-            eprintln!("Usage: readpe <FILE>");
-            process::exit(1);
+            exit_error("PE file path is required for CLI mode", cli.json, 1);
         }
     };
 
     let data = match fs::read(&file) {
         Ok(d) => d,
         Err(e) => {
-            eprintln!("Error: Failed to read '{}': {}", file.display(), e);
-            process::exit(1);
+            exit_error(&format!("Failed to read '{}': {}", file.display(), e), cli.json, 1);
         }
     };
 
     let pe = match goblin::pe::PE::parse(&data) {
         Ok(pe) => pe,
         Err(e) => {
-            eprintln!("Error: Failed to parse PE file: {}", e);
-            process::exit(1);
+            exit_error(&format!("Failed to parse PE file: {}", e), cli.json, 1);
         }
     };
+
+    #[cfg(feature = "tui")]
+    if want_tui {
+        let file_name = file.display().to_string();
+        if let Err(e) = tui::run(&data, &pe, &file_name) {
+            exit_error(&format!("TUI failed: {}", e), cli.json, 1);
+        }
+        return;
+    }
 
     // If no specific flags, show all
     let show_all = cli.all
@@ -133,11 +154,23 @@ fn main() {
 
     if let Some(path) = &cli.output {
         if let Err(e) = fs::write(path, &output_text) {
-            eprintln!("Error: Failed to write output to '{}': {}", path.display(), e);
-            process::exit(1);
+            exit_error(
+                &format!("Failed to write output to '{}': {}", path.display(), e),
+                cli.json, 2,
+            );
         }
         println!("Output written to: {}", path.display());
     } else {
         print!("{}", output_text);
     }
+}
+
+fn exit_error(message: &str, json_mode: bool, code: i32) -> ! {
+    if json_mode {
+        let err = serde_json::json!({ "error": message });
+        eprintln!("{}", err);
+    } else {
+        eprintln!("Error: {}", message);
+    }
+    process::exit(code);
 }

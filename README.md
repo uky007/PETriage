@@ -1,4 +1,6 @@
-# readpe
+# petriage
+
+Formerly `readpe` (renamed to avoid naming collisions with existing tools).
 
 A fast, cross-platform PE (Portable Executable) file surface analysis tool with CLI and GUI, written in Rust.
 
@@ -6,7 +8,7 @@ A fast, cross-platform PE (Portable Executable) file surface analysis tool with 
 
 Malware analysts frequently examine Windows PE files, but the most capable surface analysis tools -- PEStudio and CFF Explorer -- only run on Windows. This forces analysts to maintain Windows VMs just for static triage, even when execution is unnecessary. Cross-platform alternatives are either GUI-only (PE-bear, XPEViewer), Python-based and slow (pefile, peframe), or unmaintained CLI tools with limited features (pev/readpe in C).
 
-**readpe** fills this gap: a single compiled binary that runs natively on Linux, macOS, and Windows, providing comprehensive PE surface analysis from the command line with zero runtime dependencies.
+**petriage** fills this gap: a single compiled binary that runs natively on Linux, macOS, and Windows, providing comprehensive PE surface analysis from the command line with zero runtime dependencies.
 
 ## Concept
 
@@ -33,6 +35,7 @@ Malware analysts frequently examine Windows PE files, but the most capable surfa
 | Anomaly Detection | 18 heuristic rules detecting packing indicators, W^X violations, missing security features (ASLR/DEP/CFG), timestamp anomalies, structural irregularities, and suspicious API combos |
 | Resource Directory | Resource tree enumeration, VS_VERSIONINFO parsing (FileVersion, CompanyName, OriginalFilename, etc.), manifest extraction (UAC requestedExecutionLevel), embedded icon extraction and display (GUI) |
 | Output | Human-readable tables (default) or JSON (`--json`), file output (`-o`) |
+| TUI Hex Viewer | Interactive terminal hex viewer with region navigation — select PE structures (DOS Header, COFF, sections, overlay) and browse hex dumps with keyboard scrolling (opt-in via `--features tui`) |
 | GUI | egui-based GUI with tabbed views, drag & drop, filters, entropy color-coding, suspicious API highlighting, embedded icon display (opt-in via `--features gui`) |
 
 ## Installation
@@ -40,12 +43,18 @@ Malware analysts frequently examine Windows PE files, but the most capable surfa
 ### Build from source (CLI only)
 
 ```
-git clone https://github.com/uky007/readpe.git
-cd readpe
+git clone https://github.com/uky007/petriage.git
+cd petriage
 cargo build --release
 ```
 
-The binary will be at `target/release/readpe`.
+The binary will be at `target/release/petriage`.
+
+### Build with TUI Hex Viewer
+
+```
+cargo build --release --features tui
+```
 
 ### Build with GUI
 
@@ -72,29 +81,46 @@ cargo build --release --target x86_64-pc-windows-gnu
 ### CLI
 
 ```
-readpe <file.exe>              # Show all information
-readpe <file.exe> -H           # Headers only
-readpe <file.exe> -i           # Imports only
-readpe <file.exe> -s           # Sections only
-readpe <file.exe> -S           # Strings only
-readpe <file.exe> --hashes     # File hashes only
-readpe <file.exe> -r           # Resources only
-readpe <file.exe> --json       # JSON output
-readpe <file.exe> --json | jq '.suspicious_summary'              # Suspicious API summary
-readpe <file.exe> --json | jq '.imports[].functions[] | select(.risk != null)'  # Risky APIs only
-readpe <file.exe> --json | jq '.anomalies'                      # All anomalies
-readpe <file.exe> --json | jq '.anomalies[] | select(.severity == "critical")'  # Critical anomalies only
-readpe <file.exe> --json | jq '.resources'                                     # Resources
-readpe <file.exe> --json | jq '.resources.version_info'                        # Version info
-readpe <file.exe> --json | jq '.resources.manifest'                            # Manifest XML
-readpe <file.exe> -o report.txt  # Write to file
+petriage <file.exe>              # Show all information
+petriage <file.exe> -H           # Headers only
+petriage <file.exe> -i           # Imports only
+petriage <file.exe> -e           # Exports only
+petriage <file.exe> -s           # Sections only
+petriage <file.exe> -S           # Strings only
+petriage <file.exe> --hashes     # File hashes only
+petriage <file.exe> --overlay    # Overlay only
+petriage <file.exe> -r           # Resources only
+petriage <file.exe> --json       # JSON output
+petriage <file.exe> --json | jq '.suspicious_summary'              # Suspicious API summary
+petriage <file.exe> --json | jq '.imports[].functions[] | select(.risk != null)'  # Risky APIs only
+petriage <file.exe> --json | jq '.anomalies'                      # All anomalies
+petriage <file.exe> --json | jq '.anomalies[] | select(.severity == "critical")'  # Critical anomalies only
+petriage <file.exe> --json | jq '.resources'                                     # Resources
+petriage <file.exe> --json | jq '.resources.version_info'                        # Version info
+petriage <file.exe> --json | jq '.resources.manifest'                            # Manifest XML
+petriage <file.exe> -o report.txt  # Write to file
 ```
+
+### TUI Hex Viewer (requires `--features tui` build)
+
+```
+petriage -x <file.exe>            # Interactive hex viewer (short form)
+petriage --view <file.exe>        # Interactive hex viewer (long form)
+```
+
+The TUI provides:
+
+- **Split-pane layout** — Left pane lists PE regions (DOS Header, COFF, Optional Header, sections, overlay); right pane shows hex dump
+- **Region navigation** — Up/Down arrows to select regions; hex view updates instantly
+- **Hex scrolling** — j/k for line scroll, PgUp/PgDn for page scroll, Home/End for jump
+- **Classic hex format** — Offset | hex bytes | ASCII sidebar, 16 bytes per line
+- **Alternate screen** — Launches in alternate terminal screen; restores on exit (like `git log`)
 
 ### GUI (requires `--features gui` build)
 
 ```
-readpe --gui                   # Open with file dialog
-readpe --gui <file.exe>        # Open file directly in GUI
+petriage --gui                   # Open with file dialog
+petriage --gui <file.exe>        # Open file directly in GUI
 ```
 
 The GUI provides:
@@ -206,10 +232,31 @@ The GUI provides:
   ...
 ```
 
+## Exit Codes
+
+| Code | Meaning |
+|------|---------|
+| 0 | Success |
+| 1 | Input error (file not found, read failure, invalid PE) |
+| 2 | Output error (file write failure) |
+
+When `--json` is used, errors are output to stderr as JSON: `{"error": "message"}`.
+
+## Known Limitations
+
+- **imphash**: Not yet implemented. MD5/SHA1/SHA256 file hashes are supported.
+- **Forwarded exports**: Not detected; only name/ordinal/RVA are displayed.
+- **Export ordinals**: Computed as `ordinal_base + address_table_index`. goblin does not expose per-export ordinal fields, so PEs with non-contiguous ordinal assignments may show approximated values.
+- **Import by ordinal**: Deferred to goblin's output; ordinal-only imports may show as empty names.
+- **String extraction**: Capped at 100,000 strings to prevent excessive memory usage on large files.
+- **Malformed PEs**: Arithmetic operations on PE header fields use checked arithmetic to avoid panics on crafted inputs. goblin may silently accept structurally invalid files without error. Fuzz testing with adversarial PEs is ongoing.
+- **Rich header, TLS, Debug, Load Config directories**: Not yet implemented.
+- **RVA-to-offset conversion**: Validated with overflow checks and file boundary verification; however, PEs with unusual section layouts may produce incorrect mappings.
+
 ## Roadmap
 
-- **v0.2**: Rich header, TLS/Debug directories
-- **v0.3**: .NET metadata, Authenticode signatures, packer detection, entropy histogram
+- **v0.2**: Rich header, TLS/Debug directories, imphash, packer detection
+- **v0.3**: .NET metadata, Authenticode signatures, entropy histogram
 - **Future**: ELF format support
 
 ## License

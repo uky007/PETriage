@@ -147,7 +147,7 @@ Based on the survey, a comprehensive PE surface analysis tool needs:
 
 ## 7. Conclusion
 
-There is a clear, validated opportunity for a **fast, cross-platform, CLI-first PE surface analysis tool written in Rust**. The ideal tool (readpe) would:
+There is a clear, validated opportunity for a **fast, cross-platform, CLI-first PE surface analysis tool written in Rust**. The ideal tool (petriage) would:
 
 1. **Run natively** on Linux/macOS/Windows as a single static binary with zero dependencies
 2. **Provide comprehensive PE structure analysis** matching PEStudio's read-only analysis features

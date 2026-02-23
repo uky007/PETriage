@@ -33,7 +33,7 @@ pub fn run(file: Option<PathBuf>) {
     };
 
     let _ = eframe::run_native(
-        "readpe",
+        "petriage",
         options,
         Box::new(move |cc| {
             setup_style(&cc.egui_ctx);
@@ -290,7 +290,7 @@ impl eframe::App for ReadpeApp {
                         }
                     });
                     ui.separator();
-                    ui.colored_label(ACCENT, "readpe");
+                    ui.colored_label(ACCENT, "petriage");
                     ui.colored_label(TEXT_DIM, format!("v{}", env!("CARGO_PKG_VERSION")));
                 });
             });
@@ -336,7 +336,7 @@ impl eframe::App for ReadpeApp {
             .show(ctx, |ui| {
                 // Logo area
                 ui.vertical_centered(|ui| {
-                    ui.colored_label(ACCENT, "\u{2588}\u{2588} readpe");
+                    ui.colored_label(ACCENT, "\u{2588}\u{2588} petriage");
                     ui.colored_label(TEXT_DIM, "PE Surface Analysis");
                 });
                 ui.add_space(12.0);
@@ -406,7 +406,7 @@ impl eframe::App for ReadpeApp {
                             ui.add_space(ui.available_height() / 3.0);
                             ui.colored_label(
                                 ACCENT,
-                                egui::RichText::new("\u{2588}\u{2588} readpe").size(28.0),
+                                egui::RichText::new("\u{2588}\u{2588} petriage").size(28.0),
                             );
                             ui.add_space(8.0);
                             ui.colored_label(
