@@ -45,7 +45,7 @@ struct Cli {
     #[arg(long, default_value_t = 4)]
     min_str_len: usize,
 
-    /// Show file hashes (MD5, SHA1, SHA256)
+    /// Show file hashes (MD5, SHA1, SHA256, imphash)
     #[arg(long)]
     hashes: bool,
 
@@ -65,6 +65,18 @@ struct Cli {
     #[arg(long)]
     json: bool,
 
+    /// Output as newline-delimited JSON (one JSON object per line)
+    #[arg(long, conflicts_with = "json")]
+    ndjson: bool,
+
+    /// Batch-analyze all PE files in a directory
+    #[arg(long, value_name = "DIR")]
+    batch: Option<PathBuf>,
+
+    /// Exit with code 3 if any anomaly meets or exceeds the given severity
+    #[arg(long, value_name = "SEVERITY", value_parser = parse_severity)]
+    fail_on: Option<String>,
+
     /// Write output to file
     #[arg(short = 'o', long)]
     output: Option<PathBuf>,
@@ -80,10 +92,73 @@ struct Cli {
     gui: bool,
 }
 
+fn parse_severity(s: &str) -> Result<String, String> {
+    match s {
+        "critical" | "warning" | "info" => Ok(s.to_string()),
+        _ => Err(format!("invalid severity '{}': must be critical, warning, or info", s)),
+    }
+}
+
+fn severity_rank(s: &str) -> u8 {
+    match s {
+        "critical" => 3,
+        "warning" => 2,
+        "info" => 1,
+        _ => 0,
+    }
+}
+
+fn check_fail_on(result: &analysis::AnalysisResult, threshold: &str) -> bool {
+    let threshold_rank = severity_rank(threshold);
+    if let Some(ref anomalies) = result.anomalies {
+        anomalies.iter().any(|a| severity_rank(&a.severity) >= threshold_rank)
+    } else {
+        false
+    }
+}
+
+fn is_pe_file(path: &std::path::Path) -> bool {
+    if let Ok(f) = fs::File::open(path) {
+        use std::io::Read;
+        let mut buf = [0u8; 2];
+        let mut f = f;
+        if f.read_exact(&mut buf).is_ok() {
+            return buf == [b'M', b'Z'];
+        }
+    }
+    false
+}
+
+fn analyze_file(
+    path: &std::path::Path,
+    show_all: bool,
+    cli: &Cli,
+) -> Result<analysis::AnalysisResult, String> {
+    let data = fs::read(path)
+        .map_err(|e| format!("Failed to read '{}': {}", path.display(), e))?;
+    let pe = goblin::pe::PE::parse(&data)
+        .map_err(|e| format!("Failed to parse PE '{}': {}", path.display(), e))?;
+    Ok(analysis::analyze(&data, &pe, &analysis::AnalysisOptions {
+        show_headers: show_all || cli.headers,
+        show_sections: show_all || cli.sections,
+        show_imports: show_all || cli.imports,
+        show_exports: show_all || cli.exports,
+        show_strings: show_all || cli.strings,
+        show_hashes: show_all || cli.hashes,
+        show_overlay: show_all || cli.overlay,
+        show_resources: show_all || cli.resources,
+        show_authenticode: show_all || cli.authenticode,
+        show_all,
+        min_str_len: cli.min_str_len,
+        file_name: path.display().to_string(),
+    }))
+}
+
 // Exit codes:
 //   0 — success
 //   1 — input error (file not found, read failure, invalid PE)
 //   2 — output error (write failure)
+//   3 — anomaly threshold exceeded (--fail-on)
 fn main() {
     let cli = Cli::parse();
 
@@ -93,33 +168,122 @@ fn main() {
         return;
     }
 
+    let json_mode = cli.json || cli.ndjson;
+
     #[cfg(feature = "tui")]
     let want_tui = cli.view;
     #[cfg(not(feature = "tui"))]
     let want_tui = false;
 
-    if !want_tui && !cli.json {
+    if !want_tui && !json_mode {
         output::print_banner();
     }
 
+    // --batch mode
+    if let Some(ref dir) = cli.batch {
+        if cli.file.is_some() {
+            exit_error("Cannot specify both a file and --batch", json_mode, 1);
+        }
+        if !dir.is_dir() {
+            exit_error(&format!("'{}' is not a directory", dir.display()), json_mode, 1);
+        }
+
+        let show_all = cli.all
+            || !(cli.headers || cli.sections || cli.imports || cli.exports
+                || cli.strings || cli.hashes || cli.overlay || cli.resources
+                || cli.authenticode);
+
+        let mut entries: Vec<PathBuf> = match fs::read_dir(dir) {
+            Ok(rd) => rd
+                .filter_map(|e| e.ok())
+                .map(|e| e.path())
+                .filter(|p| p.is_file() && is_pe_file(p))
+                .collect(),
+            Err(e) => {
+                exit_error(&format!("Failed to read directory '{}': {}", dir.display(), e), json_mode, 1);
+            }
+        };
+        entries.sort();
+
+        let mut results: Vec<analysis::AnalysisResult> = Vec::new();
+        let mut ndjson_buf = String::new();
+        let mut any_fail_on = false;
+
+        for path in &entries {
+            match analyze_file(path, show_all, &cli) {
+                Ok(result) => {
+                    if let Some(ref threshold) = cli.fail_on {
+                        if check_fail_on(&result, threshold) {
+                            any_fail_on = true;
+                        }
+                    }
+                    if cli.ndjson {
+                        ndjson_buf.push_str(&output::format_ndjson(&result));
+                    } else {
+                        results.push(result);
+                    }
+                }
+                Err(msg) => {
+                    if cli.ndjson {
+                        let err = serde_json::json!({ "error": msg });
+                        ndjson_buf.push_str(&format!("{}\n", err));
+                    } else {
+                        eprintln!("Error: {}", msg);
+                    }
+                }
+            }
+        }
+
+        let output_text = if cli.json {
+            serde_json::to_string_pretty(&results)
+                .unwrap_or_else(|e| format!("JSON error: {}", e))
+        } else if cli.ndjson {
+            ndjson_buf
+        } else {
+            let mut buf = String::new();
+            for result in &results {
+                buf.push_str(&output::format_text(result));
+            }
+            buf
+        };
+
+        if let Some(ref path) = cli.output {
+            if let Err(e) = fs::write(path, &output_text) {
+                exit_error(
+                    &format!("Failed to write output to '{}': {}", path.display(), e),
+                    json_mode, 2,
+                );
+            }
+            println!("Output written to: {}", path.display());
+        } else {
+            print!("{}", output_text);
+        }
+
+        if any_fail_on {
+            process::exit(3);
+        }
+        return;
+    }
+
+    // Single-file mode
     let file = match cli.file {
         Some(f) => f,
         None => {
-            exit_error("PE file path is required for CLI mode", cli.json, 1);
+            exit_error("PE file path is required for CLI mode", json_mode, 1);
         }
     };
 
     let data = match fs::read(&file) {
         Ok(d) => d,
         Err(e) => {
-            exit_error(&format!("Failed to read '{}': {}", file.display(), e), cli.json, 1);
+            exit_error(&format!("Failed to read '{}': {}", file.display(), e), json_mode, 1);
         }
     };
 
     let pe = match goblin::pe::PE::parse(&data) {
         Ok(pe) => pe,
         Err(e) => {
-            exit_error(&format!("Failed to parse PE file: {}", e), cli.json, 1);
+            exit_error(&format!("Failed to parse PE file: {}", e), json_mode, 1);
         }
     };
 
@@ -127,7 +291,7 @@ fn main() {
     if want_tui {
         let file_name = file.display().to_string();
         if let Err(e) = tui::run(&data, &pe, &file_name) {
-            exit_error(&format!("TUI failed: {}", e), cli.json, 1);
+            exit_error(&format!("TUI failed: {}", e), json_mode, 1);
         }
         return;
     }
@@ -148,11 +312,14 @@ fn main() {
         show_overlay: show_all || cli.overlay,
         show_resources: show_all || cli.resources,
         show_authenticode: show_all || cli.authenticode,
+        show_all,
         min_str_len: cli.min_str_len,
         file_name: file.display().to_string(),
     });
 
-    let output_text = if cli.json {
+    let output_text = if cli.ndjson {
+        output::format_ndjson(&result)
+    } else if cli.json {
         output::format_json(&result)
     } else {
         output::format_text(&result)
@@ -162,12 +329,18 @@ fn main() {
         if let Err(e) = fs::write(path, &output_text) {
             exit_error(
                 &format!("Failed to write output to '{}': {}", path.display(), e),
-                cli.json, 2,
+                json_mode, 2,
             );
         }
         println!("Output written to: {}", path.display());
     } else {
         print!("{}", output_text);
+    }
+
+    if let Some(ref threshold) = cli.fail_on {
+        if check_fail_on(&result, threshold) {
+            process::exit(3);
+        }
     }
 }
 

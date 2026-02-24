@@ -29,13 +29,18 @@ Malware analysts frequently examine Windows PE files, but the most capable surfa
 | Imports | DLL names and imported function names with suspicious API indicators |
 | Exports | Exported function names, ordinals, RVAs |
 | Strings | ASCII and UTF-16LE extraction with configurable minimum length |
-| Hashes | MD5, SHA1, SHA256 of the entire file |
+| Hashes | MD5, SHA1, SHA256 of the entire file, imphash (Mandiant-compatible import hash) |
 | Overlay | Detection of data appended beyond the PE structure |
 | Suspicious API Indicators | Auto-tags ~130 Windows APIs across 12 risk categories (Process Injection, Code Execution, Network, Evasion, etc.) with severity levels (high/medium/low) |
 | Anomaly Detection | 18 heuristic rules detecting packing indicators, W^X violations, missing security features (ASLR/DEP/CFG), timestamp anomalies, structural irregularities, and suspicious API combos |
 | Resource Directory | Resource tree enumeration, VS_VERSIONINFO parsing (FileVersion, CompanyName, OriginalFilename, etc.), manifest extraction (UAC requestedExecutionLevel), embedded icon extraction and display (GUI) |
+| Rich Header | XOR key extraction, compiler/linker tool entries (prod_id, build_id, count). Enables compiler identification and build environment fingerprinting |
+| TLS Directory | TLS callback detection with VA listing. Critical for malware — TLS callbacks execute before main() and are commonly used for anti-debug/unpacking |
+| Debug Directory | Debug entry enumeration, CodeView (RSDS) parsing with PDB path, GUID, and age extraction |
 | Authenticode | Digital signature presence detection, PKCS#7/CMS parsing, X.509 certificate chain extraction (subject, issuer, serial, validity, SHA-1 thumbprint), signer identification, expiry/self-signed/chain warnings. Cross-platform — no Windows CryptoAPI required. Trust verification is not performed. |
-| Output | Human-readable tables (default) or JSON (`--json`), file output (`-o`) |
+| Output | Human-readable tables (default), JSON (`--json`), NDJSON (`--ndjson`), file output (`-o`) |
+| Batch Mode | Analyze all PE files in a directory (`--batch <dir>`) |
+| Fail-on | Exit with code 3 if anomalies meet a severity threshold (`--fail-on <severity>`) |
 | TUI Hex Viewer | Interactive terminal hex viewer with region navigation — select PE structures (DOS Header, COFF, sections, overlay) and browse hex dumps with keyboard scrolling (opt-in via `--features tui`) |
 | GUI | egui-based GUI with tabbed views, drag & drop, filters, entropy color-coding, suspicious API highlighting, embedded icon display (opt-in via `--features gui`) |
 
@@ -102,6 +107,10 @@ petriage <file.exe> --json | jq '.resources.version_info'                       
 petriage <file.exe> --json | jq '.resources.manifest'                            # Manifest XML
 petriage <file.exe> --json | jq '.authenticode'                                  # Authenticode info
 petriage <file.exe> --json | jq '.authenticode.signer'                           # Signer certificate
+petriage <file.exe> --ndjson       # Compact one-line JSON output
+petriage --batch <dir> --ndjson   # Batch-analyze all PEs in a directory (NDJSON output)
+petriage --batch <dir> --json     # Batch-analyze all PEs (JSON array output)
+petriage <file.exe> --fail-on warning  # Exit code 3 if any warning+ anomaly found
 petriage <file.exe> -o report.txt  # Write to file
 ```
 
@@ -129,7 +138,7 @@ petriage --gui <file.exe>        # Open file directly in GUI
 
 The GUI provides:
 
-- **Tabbed interface** — File Info, Headers, Sections, Imports, Exports, Strings, Overlay, Resources, Signing
+- **Tabbed interface** — File Info, Headers, Sections, Imports, Exports, Strings, Overlay, Resources, Rich, TLS, Debug, Signing
 - **Drag & drop** — Drop PE files onto the window to analyze
 - **Left sidebar** — Toggle analysis options and re-analyze without restarting
 - **Import filter** — Search API names across DLLs, "Suspicious only" toggle to surface risky APIs
@@ -152,6 +161,7 @@ The GUI provides:
   MD5:     a1b2c3d4e5f6...
   SHA1:    1234567890ab...
   SHA256:  abcdef012345...
+  Imphash: 5a8e4dc5b6f7...
 
 === COFF Header ===
   Machine:              IMAGE_FILE_MACHINE_I386 (x86) (0x014c)
@@ -272,12 +282,12 @@ The GUI provides:
 | 0 | Success |
 | 1 | Input error (file not found, read failure, invalid PE) |
 | 2 | Output error (file write failure) |
+| 3 | Anomaly threshold exceeded (`--fail-on`) |
 
-When `--json` is used, errors are output to stderr as JSON: `{"error": "message"}`.
+When `--json` or `--ndjson` is used, errors are output to stderr as JSON: `{"error": "message"}`.
 
 ## Known Limitations
 
-- **imphash**: Not yet implemented. MD5/SHA1/SHA256 file hashes are supported.
 - **Forwarded exports**: Not detected; only name/ordinal/RVA are displayed.
 - **Export ordinals**: Computed as `ordinal_base + address_table_index`. goblin does not expose per-export ordinal fields, so PEs with non-contiguous ordinal assignments may show approximated values.
 - **Import by ordinal**: Deferred to goblin's output; ordinal-only imports may show as empty names.
@@ -285,12 +295,12 @@ When `--json` is used, errors are output to stderr as JSON: `{"error": "message"
 - **Malformed PEs**: Arithmetic operations on PE header fields use checked arithmetic to avoid panics on crafted inputs. goblin may silently accept structurally invalid files without error. Fuzz testing with adversarial PEs is ongoing.
 - **Authenticode trust verification**: Signature parsing and certificate extraction are supported, but trust verification (chain validation against a root store) is not performed. `trust_verified` is always `false`.
 - **Authenticode dual-signing**: Only the first WIN_CERTIFICATE entry and first SignerInfo are processed. Dual-signed PEs (e.g., SHA-1 + SHA-256) will only show one signature.
-- **Rich header, TLS, Debug, Load Config directories**: Not yet implemented.
+- **Load Config directory**: Not yet implemented.
 - **RVA-to-offset conversion**: Validated with overflow checks and file boundary verification; however, PEs with unusual section layouts may produce incorrect mappings.
 
 ## Roadmap
 
-- **v0.2**: Rich header, TLS/Debug directories, imphash, packer detection
+- **v0.2**: Load Config directory, packer detection
 - **v0.3**: .NET metadata, entropy histogram
 - **Future**: ELF format support
 

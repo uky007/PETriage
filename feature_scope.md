@@ -4,8 +4,8 @@
 
 These features are the minimum for a useful surface analysis tool. Every serious PE analysis tool provides these, and without them petriage would not be competitive.
 
-1. **File Info**: file size, file type detection, file hashes (MD5, SHA1, SHA256) — **implemented**
-   - Note: imphash is **not yet implemented** (requires ordered import hash computation)
+1. **File Info**: file size, file type detection, file hashes (MD5, SHA1, SHA256, imphash) — **implemented**
+   - imphash: Mandiant-compatible import hash (DLL name normalization, `.dll`/`.ocx`/`.sys` extension removal, ordinal fallback) — **implemented**
 2. **DOS Header**: e_magic, e_lfanew — **implemented** (minimal fields, not full 64-byte DOS header)
 3. **PE Signature**: PE signature validation ("PE\0\0") — **implemented** (via goblin)
 4. **COFF/File Header**: machine type, number of sections, timestamp, characteristics — **implemented**
@@ -18,16 +18,19 @@ These features are the minimum for a useful surface analysis tool. Every serious
    - Note: forwarded exports detection is **not yet implemented**
 10. **Strings**: ASCII and UTF-16LE string extraction (configurable min length, default 4, max 100K strings) — **implemented**
 11. **Overlay Detection**: detect data appended after the last section (offset and size) — **implemented**
-12. **Output Formats**: human-readable table output (default) + JSON output (`--json`) + file output (`-o`) — **implemented**
+12. **Output Formats**: human-readable table output (default) + JSON output (`--json`) + NDJSON output (`--ndjson`) + file output (`-o`) — **implemented**
+    - `--batch <dir>`: Batch-analyze all PE files in a directory — **implemented**
+    - `--ndjson`: Newline-delimited JSON (one JSON object per line, ideal for streaming/piping) — **implemented**
+    - `--fail-on <severity>`: Exit with code 3 if any anomaly meets or exceeds the given severity (critical/warning/info) — **implemented**
 
 ## v0.2 — Important
 
 These features differentiate a good tool from a basic one. PEStudio, PE-bear, and PPEE all provide these.
 
 13. **Resource Directory**: resource tree parsing (types, names, languages, sizes), VS_VERSIONINFO parsing, manifest extraction, embedded icon extraction (RT_GROUP_ICON / RT_ICON → ICO reconstruction) and GUI display — **implemented**
-14. **Rich Header**: parsing, XOR key extraction, compiler/linker tool entries (comp.id, product.id, count) — **not yet implemented**
-15. **TLS Directory**: TLS callback detection (critical for malware — callbacks run before main) — **not yet implemented**
-16. **Debug Directory**: PDB path, debug type (CodeView, COFF, etc.), GUID, age — **not yet implemented**
+14. **Rich Header**: parsing, XOR key extraction, compiler/linker tool entries (comp.id, product.id, count) — **implemented**
+15. **TLS Directory**: TLS callback detection (critical for malware — callbacks run before main), PE32/PE32+ support, callback VA listing — **implemented**
+16. **Debug Directory**: PDB path, debug type (CodeView, COFF, etc.), GUID, age — **implemented**
 17. **Suspicious API Indicators**: ~130 APIs across 12 categories with 3-level severity (high/medium/low), CLI color-coding, GUI filtering — **implemented**
 18. **Anomaly Detection**: 18 heuristic rules with `rule_id`/`evidence`/`threshold` for JSON traceability. Covers packing (entropy, W^X, expansion ratio), security features (ASLR/DEP/CFG/SEH), timestamp anomalies, structural issues, suspicious API combos. All arithmetic uses checked/float operations to prevent overflow panics on crafted PEs — **implemented**
 19. **Load Config Directory**: SEH handler table, CFG function table, guard flags — **not yet implemented**

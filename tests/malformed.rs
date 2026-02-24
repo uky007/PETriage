@@ -751,3 +751,525 @@ fn authenticode_not_in_json_when_flag_off() {
             "authenticode should not appear when flag is off");
     }
 }
+
+// --- Rich Header tests ---
+
+#[test]
+fn rich_header_present_in_pe_with_rich() {
+    // Build a minimal PE that has a Rich Header between 0x80 and e_lfanew
+    let mut data = vec![0u8; 1024];
+    data[0] = b'M'; data[1] = b'Z';
+    // e_lfanew = 0x100 (gives room for Rich Header between 0x80 and 0x100)
+    data[0x3C..0x40].copy_from_slice(&0x100u32.to_le_bytes());
+
+    let xor_key: u32 = 0xAABBCCDD;
+
+    // DanS signature at 0x80 (XOR encoded)
+    let dans = 0x536E6144u32 ^ xor_key;
+    data[0x80..0x84].copy_from_slice(&dans.to_le_bytes());
+    // 3 padding dwords (XOR key)
+    for i in 0..3 {
+        let pad = 0u32 ^ xor_key;
+        let off = 0x84 + i * 4;
+        data[off..off + 4].copy_from_slice(&pad.to_le_bytes());
+    }
+
+    // One Rich entry at 0x90: comp_id=0x00930042 (prod_id=0x0093, build_id=0x0042), count=7
+    let comp_id = 0x00930042u32 ^ xor_key;
+    let count = 7u32 ^ xor_key;
+    data[0x90..0x94].copy_from_slice(&comp_id.to_le_bytes());
+    data[0x94..0x98].copy_from_slice(&count.to_le_bytes());
+
+    // "Rich" marker at 0x98
+    data[0x98..0x9C].copy_from_slice(&0x68636952u32.to_le_bytes());
+    // XOR key at 0x9C
+    data[0x9C..0xA0].copy_from_slice(&xor_key.to_le_bytes());
+
+    // PE signature at 0x100
+    data[0x100] = b'P'; data[0x101] = b'E';
+    data[0x104] = 0x4c; data[0x105] = 0x01; // i386
+    data[0x106..0x108].copy_from_slice(&1u16.to_le_bytes()); // 1 section
+    data[0x114..0x116].copy_from_slice(&0xE0u16.to_le_bytes()); // SizeOfOptionalHeader
+    data[0x116..0x118].copy_from_slice(&0x0102u16.to_le_bytes()); // Characteristics
+    data[0x118..0x11A].copy_from_slice(&0x010Bu16.to_le_bytes()); // PE32
+
+    let output = petriage_run(&data);
+    if output.status.code() == Some(0) {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let val: serde_json::Value = serde_json::from_str(&stdout)
+            .expect("stdout should be valid JSON");
+        let rich = val.get("rich_header").expect("should have rich_header field");
+        assert_eq!(rich["xor_key_raw"], 0xAABBCCDDu32 as i64);
+        let entries = rich["entries"].as_array().expect("entries should be array");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0]["build_id"], 0x0042);
+        assert_eq!(entries[0]["prod_id"], 0x0093);
+        assert_eq!(entries[0]["count"], 7);
+    }
+}
+
+#[test]
+fn rich_header_absent_when_no_rich() {
+    // Standard minimal PE without Rich Header
+    let data = build_minimal_pe_with_cert_dd(0, 0);
+    let output = petriage_run(&data);
+    if output.status.code() == Some(0) {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let val: serde_json::Value = serde_json::from_str(&stdout)
+            .expect("stdout should be valid JSON");
+        assert!(val.get("rich_header").is_none(),
+            "rich_header should not appear when no Rich Header exists");
+    }
+}
+
+// --- TLS Directory tests ---
+
+#[test]
+fn tls_absent_when_no_tls_directory() {
+    let data = build_minimal_pe_with_cert_dd(0, 0);
+    let output = petriage_run(&data);
+    if output.status.code() == Some(0) {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let val: serde_json::Value = serde_json::from_str(&stdout)
+            .expect("stdout should be valid JSON");
+        assert!(val.get("tls").is_none(),
+            "tls should not appear when no TLS directory exists");
+    }
+}
+
+#[test]
+fn tls_present_with_tls_directory() {
+    // Build a PE with TLS Directory (DD[9])
+    let mut data = vec![0u8; 0x600];
+    data[0] = b'M'; data[1] = b'Z';
+    data[0x3C..0x40].copy_from_slice(&0x80u32.to_le_bytes());
+    data[0x80] = b'P'; data[0x81] = b'E';
+    data[0x84..0x86].copy_from_slice(&0x014Cu16.to_le_bytes()); // i386
+    data[0x86..0x88].copy_from_slice(&1u16.to_le_bytes());      // 1 section
+    data[0x94..0x96].copy_from_slice(&0xE0u16.to_le_bytes());   // SizeOfOptionalHeader
+    data[0x96..0x98].copy_from_slice(&0x0102u16.to_le_bytes()); // Characteristics
+    data[0x98..0x9A].copy_from_slice(&0x010Bu16.to_le_bytes()); // PE32
+    data[0xB4..0xB8].copy_from_slice(&0x400000u32.to_le_bytes()); // ImageBase
+    data[0xB8..0xBC].copy_from_slice(&0x1000u32.to_le_bytes()); // SectionAlignment
+    data[0xBC..0xC0].copy_from_slice(&0x200u32.to_le_bytes());  // FileAlignment
+    data[0xD0..0xD4].copy_from_slice(&0x3000u32.to_le_bytes()); // SizeOfImage
+    data[0xD4..0xD8].copy_from_slice(&0x200u32.to_le_bytes());  // SizeOfHeaders
+    data[0xF4..0xF8].copy_from_slice(&16u32.to_le_bytes());     // NumberOfRvaAndSizes
+    // Data Directory[9] = TLS: RVA=0x1000, Size=0x18 (24 bytes for PE32)
+    let dd9_offset = 0xF8 + 9 * 8;
+    data[dd9_offset..dd9_offset + 4].copy_from_slice(&0x1000u32.to_le_bytes());
+    data[dd9_offset + 4..dd9_offset + 8].copy_from_slice(&0x18u32.to_le_bytes());
+
+    // Section header at 0x178
+    let sh = 0x178;
+    data[sh..sh + 6].copy_from_slice(b".tls\0\0");
+    data[sh + 8..sh + 12].copy_from_slice(&0x200u32.to_le_bytes());  // VirtualSize
+    data[sh + 12..sh + 16].copy_from_slice(&0x1000u32.to_le_bytes()); // VirtualAddress
+    data[sh + 16..sh + 20].copy_from_slice(&0x200u32.to_le_bytes());  // SizeOfRawData
+    data[sh + 20..sh + 24].copy_from_slice(&0x200u32.to_le_bytes());  // PointerToRawData
+    data[sh + 36..sh + 40].copy_from_slice(&0xC0000040u32.to_le_bytes()); // READ|WRITE|INITIALIZED_DATA
+
+    // TLS Directory at file offset 0x200 (RVA 0x1000), PE32 format (24 bytes)
+    let tls_off = 0x200;
+    // RawDataStartVA = 0
+    // RawDataEndVA = 0
+    // AddressOfIndex = 0
+    // AddressOfCallBacks = 0x401080 (VA), which is RVA 0x1080
+    data[tls_off + 12..tls_off + 16].copy_from_slice(&0x401080u32.to_le_bytes());
+    // SizeOfZeroFill = 0
+    // Characteristics = 0
+
+    // Callback array at file offset 0x280 (RVA 0x1080): one callback, then null terminator
+    data[0x280..0x284].copy_from_slice(&0x401100u32.to_le_bytes()); // callback VA
+    data[0x284..0x288].copy_from_slice(&0u32.to_le_bytes()); // null terminator
+
+    let output = petriage_run(&data);
+    if output.status.code() == Some(0) {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let val: serde_json::Value = serde_json::from_str(&stdout)
+            .expect("stdout should be valid JSON");
+        let tls = val.get("tls").expect("should have tls field");
+        assert_eq!(tls["callback_count"], 1);
+        let callbacks = tls["callbacks"].as_array().expect("callbacks should be array");
+        assert_eq!(callbacks.len(), 1);
+    }
+}
+
+// --- Debug Directory tests ---
+
+#[test]
+fn debug_absent_when_no_debug_directory() {
+    let data = build_minimal_pe_with_cert_dd(0, 0);
+    let output = petriage_run(&data);
+    if output.status.code() == Some(0) {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let val: serde_json::Value = serde_json::from_str(&stdout)
+            .expect("stdout should be valid JSON");
+        assert!(val.get("debug").is_none(),
+            "debug should not appear when no Debug directory exists");
+    }
+}
+
+#[test]
+fn debug_codeview_rsds_parsed() {
+    // Build a PE with Debug Directory containing a CodeView RSDS entry
+    let mut data = vec![0u8; 0x600];
+    data[0] = b'M'; data[1] = b'Z';
+    data[0x3C..0x40].copy_from_slice(&0x80u32.to_le_bytes());
+    data[0x80] = b'P'; data[0x81] = b'E';
+    data[0x84..0x86].copy_from_slice(&0x014Cu16.to_le_bytes()); // i386
+    data[0x86..0x88].copy_from_slice(&1u16.to_le_bytes());      // 1 section
+    data[0x94..0x96].copy_from_slice(&0xE0u16.to_le_bytes());   // SizeOfOptionalHeader
+    data[0x96..0x98].copy_from_slice(&0x0102u16.to_le_bytes()); // Characteristics
+    data[0x98..0x9A].copy_from_slice(&0x010Bu16.to_le_bytes()); // PE32
+    data[0xB4..0xB8].copy_from_slice(&0x400000u32.to_le_bytes()); // ImageBase
+    data[0xB8..0xBC].copy_from_slice(&0x1000u32.to_le_bytes()); // SectionAlignment
+    data[0xBC..0xC0].copy_from_slice(&0x200u32.to_le_bytes());  // FileAlignment
+    data[0xD0..0xD4].copy_from_slice(&0x3000u32.to_le_bytes()); // SizeOfImage
+    data[0xD4..0xD8].copy_from_slice(&0x200u32.to_le_bytes());  // SizeOfHeaders
+    data[0xF4..0xF8].copy_from_slice(&16u32.to_le_bytes());     // NumberOfRvaAndSizes
+    // Data Directory[6] = Debug: RVA=0x1000, Size=0x1C (28 bytes = 1 entry)
+    let dd6_offset = 0xF8 + 6 * 8;
+    data[dd6_offset..dd6_offset + 4].copy_from_slice(&0x1000u32.to_le_bytes());
+    data[dd6_offset + 4..dd6_offset + 8].copy_from_slice(&0x1Cu32.to_le_bytes());
+
+    // Section header at 0x178
+    let sh = 0x178;
+    data[sh..sh + 7].copy_from_slice(b".rdata\0");
+    data[sh + 8..sh + 12].copy_from_slice(&0x200u32.to_le_bytes());  // VirtualSize
+    data[sh + 12..sh + 16].copy_from_slice(&0x1000u32.to_le_bytes()); // VirtualAddress
+    data[sh + 16..sh + 20].copy_from_slice(&0x200u32.to_le_bytes());  // SizeOfRawData
+    data[sh + 20..sh + 24].copy_from_slice(&0x200u32.to_le_bytes());  // PointerToRawData
+    data[sh + 36..sh + 40].copy_from_slice(&0x40000040u32.to_le_bytes()); // READ|INITIALIZED_DATA
+
+    // Debug Directory at file offset 0x200 (RVA 0x1000)
+    let dd = 0x200;
+    // +0: Characteristics (u32) = 0
+    // +4: TimeDateStamp (u32) = 0x60000000
+    data[dd + 4..dd + 8].copy_from_slice(&0x60000000u32.to_le_bytes());
+    // +8: MajorVersion = 0, +10: MinorVersion = 0
+    // +12: Type (u32) = 2 (CodeView)
+    data[dd + 12..dd + 16].copy_from_slice(&2u32.to_le_bytes());
+    // +16: SizeOfData = 0x40
+    data[dd + 16..dd + 20].copy_from_slice(&0x40u32.to_le_bytes());
+    // +20: AddressOfRawData (RVA) = 0x1080
+    data[dd + 20..dd + 24].copy_from_slice(&0x1080u32.to_le_bytes());
+    // +24: PointerToRawData (file offset) = 0x280
+    data[dd + 24..dd + 28].copy_from_slice(&0x280u32.to_le_bytes());
+
+    // CodeView RSDS data at file offset 0x280
+    let cv = 0x280;
+    // RSDS signature
+    data[cv..cv + 4].copy_from_slice(&0x53445352u32.to_le_bytes());
+    // GUID: 16 bytes
+    data[cv + 4..cv + 8].copy_from_slice(&0x11223344u32.to_le_bytes()); // Data1
+    data[cv + 8..cv + 10].copy_from_slice(&0x5566u16.to_le_bytes());    // Data2
+    data[cv + 10..cv + 12].copy_from_slice(&0x7788u16.to_le_bytes());   // Data3
+    data[cv + 12..cv + 20].copy_from_slice(&[0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x00]); // Data4
+    // Age
+    data[cv + 20..cv + 24].copy_from_slice(&1u32.to_le_bytes());
+    // PDB path
+    let pdb = b"C:\\build\\test.pdb\0";
+    data[cv + 24..cv + 24 + pdb.len()].copy_from_slice(pdb);
+
+    let output = petriage_run(&data);
+    if output.status.code() == Some(0) {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let val: serde_json::Value = serde_json::from_str(&stdout)
+            .expect("stdout should be valid JSON");
+        let debug = val.get("debug").expect("should have debug field");
+        let entries = debug["entries"].as_array().expect("entries should be array");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0]["debug_type"], "CodeView");
+        assert_eq!(entries[0]["debug_type_raw"], 2);
+        assert_eq!(entries[0]["age"], 1);
+        let pdb_path = entries[0]["pdb_path"].as_str().expect("should have pdb_path");
+        assert_eq!(pdb_path, "C:\\build\\test.pdb");
+        let guid = entries[0]["guid"].as_str().expect("should have guid");
+        assert_eq!(guid, "11223344-5566-7788-99AA-BBCCDDEEFF00");
+    }
+}
+
+// --- Filter regression tests (rich_header/tls/debug gated by show_all) ---
+
+#[test]
+fn headers_only_excludes_rich_tls_debug() {
+    let data = build_minimal_pe_with_cert_dd(0, 0);
+    let output = petriage_run_with_args(&data, &["--json", "-H"]);
+    if output.status.code() == Some(0) {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let val: serde_json::Value = serde_json::from_str(&stdout)
+            .expect("stdout should be valid JSON");
+        // -H should include dos_header and coff_header
+        assert!(val.get("dos_header").is_some(), "dos_header should be present with -H");
+        assert!(val.get("coff_header").is_some(), "coff_header should be present with -H");
+        // -H should NOT include rich_header, tls, or debug (they require show_all)
+        assert!(val.get("rich_header").is_none(),
+            "rich_header should not appear with -H only");
+        assert!(val.get("tls").is_none(),
+            "tls should not appear with -H only");
+        assert!(val.get("debug").is_none(),
+            "debug should not appear with -H only");
+    }
+}
+
+// --- imphash tests ---
+
+fn build_pe_with_imports() -> Vec<u8> {
+    // Build a minimal PE32 with an import table importing KERNEL32.dll!ExitProcess
+    let mut data = vec![0u8; 0x600];
+    data[0] = b'M'; data[1] = b'Z';
+    data[0x3C..0x40].copy_from_slice(&0x80u32.to_le_bytes());
+    data[0x80] = b'P'; data[0x81] = b'E';
+    data[0x84..0x86].copy_from_slice(&0x014Cu16.to_le_bytes()); // i386
+    data[0x86..0x88].copy_from_slice(&1u16.to_le_bytes());      // 1 section
+    data[0x94..0x96].copy_from_slice(&0xE0u16.to_le_bytes());   // SizeOfOptionalHeader
+    data[0x96..0x98].copy_from_slice(&0x0102u16.to_le_bytes()); // Characteristics
+    data[0x98..0x9A].copy_from_slice(&0x010Bu16.to_le_bytes()); // PE32
+    data[0xB4..0xB8].copy_from_slice(&0x400000u32.to_le_bytes()); // ImageBase
+    data[0xB8..0xBC].copy_from_slice(&0x1000u32.to_le_bytes()); // SectionAlignment
+    data[0xBC..0xC0].copy_from_slice(&0x200u32.to_le_bytes());  // FileAlignment
+    data[0xD0..0xD4].copy_from_slice(&0x3000u32.to_le_bytes()); // SizeOfImage
+    data[0xD4..0xD8].copy_from_slice(&0x200u32.to_le_bytes());  // SizeOfHeaders
+    data[0xF4..0xF8].copy_from_slice(&16u32.to_le_bytes());     // NumberOfRvaAndSizes
+    // Data Directory[1] = Import Table: RVA=0x1000, Size=0x28 (2 entries: 1 real + 1 null terminator)
+    let dd1_offset = 0xF8 + 1 * 8;
+    data[dd1_offset..dd1_offset + 4].copy_from_slice(&0x1000u32.to_le_bytes());
+    data[dd1_offset + 4..dd1_offset + 8].copy_from_slice(&0x28u32.to_le_bytes());
+
+    // Section header at 0x178
+    let sh = 0x178;
+    data[sh..sh + 7].copy_from_slice(b".rdata\0");
+    data[sh + 8..sh + 12].copy_from_slice(&0x400u32.to_le_bytes());  // VirtualSize
+    data[sh + 12..sh + 16].copy_from_slice(&0x1000u32.to_le_bytes()); // VirtualAddress
+    data[sh + 16..sh + 20].copy_from_slice(&0x400u32.to_le_bytes());  // SizeOfRawData
+    data[sh + 20..sh + 24].copy_from_slice(&0x200u32.to_le_bytes());  // PointerToRawData
+    data[sh + 36..sh + 40].copy_from_slice(&0x40000040u32.to_le_bytes()); // READ|INITIALIZED_DATA
+
+    // Import Directory Table at file offset 0x200 (RVA 0x1000)
+    // Entry 1: KERNEL32.dll
+    let idt = 0x200;
+    // OriginalFirstThunk (ILT RVA) = 0x1080
+    data[idt..idt + 4].copy_from_slice(&0x1080u32.to_le_bytes());
+    // TimeDateStamp = 0
+    // ForwarderChain = 0
+    // Name RVA = 0x10C0
+    data[idt + 12..idt + 16].copy_from_slice(&0x10C0u32.to_le_bytes());
+    // FirstThunk (IAT RVA) = 0x1090
+    data[idt + 16..idt + 20].copy_from_slice(&0x1090u32.to_le_bytes());
+    // Entry 2: null terminator (20 bytes of zeros at idt+20..idt+40 — already zero)
+
+    // Import Lookup Table (ILT) at file offset 0x280 (RVA 0x1080)
+    // Entry: Hint/Name RVA = 0x10A0
+    data[0x280..0x284].copy_from_slice(&0x10A0u32.to_le_bytes());
+    // Null terminator
+    data[0x284..0x288].copy_from_slice(&0u32.to_le_bytes());
+
+    // Import Address Table (IAT) at file offset 0x290 (RVA 0x1090)
+    data[0x290..0x294].copy_from_slice(&0x10A0u32.to_le_bytes());
+    data[0x294..0x298].copy_from_slice(&0u32.to_le_bytes());
+
+    // Hint/Name Table at file offset 0x2A0 (RVA 0x10A0)
+    // Hint (u16) = 0
+    data[0x2A0..0x2A2].copy_from_slice(&0u16.to_le_bytes());
+    // Name = "ExitProcess\0"
+    data[0x2A2..0x2AE].copy_from_slice(b"ExitProcess\0");
+
+    // DLL Name at file offset 0x2C0 (RVA 0x10C0)
+    data[0x2C0..0x2CD].copy_from_slice(b"KERNEL32.dll\0");
+
+    data
+}
+
+#[test]
+fn imphash_present_with_imports() {
+    let data = build_pe_with_imports();
+    let output = petriage_run_with_args(&data, &["--json", "--hashes"]);
+    assert_eq!(output.status.code(), Some(0), "should exit 0");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let val: serde_json::Value = serde_json::from_str(&stdout)
+        .expect("stdout should be valid JSON");
+    let hashes = val.get("hashes").expect("should have hashes field");
+    let imphash = hashes.get("imphash").expect("should have imphash field");
+    let imphash_str = imphash.as_str().expect("imphash should be a string");
+    assert_eq!(imphash_str.len(), 32, "imphash should be 32 hex chars, got '{}'", imphash_str);
+    assert!(imphash_str.chars().all(|c| c.is_ascii_hexdigit()),
+        "imphash should be hex, got '{}'", imphash_str);
+}
+
+#[test]
+fn imphash_absent_without_imports() {
+    // Minimal PE with no import table
+    let data = build_minimal_pe_with_cert_dd(0, 0);
+    let output = petriage_run_with_args(&data, &["--json", "--hashes"]);
+    if output.status.code() == Some(0) {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let val: serde_json::Value = serde_json::from_str(&stdout)
+            .expect("stdout should be valid JSON");
+        let hashes = val.get("hashes").expect("should have hashes field");
+        // imphash should be null or absent (skip_serializing_if = "Option::is_none")
+        assert!(hashes.get("imphash").is_none() || hashes["imphash"].is_null(),
+            "imphash should be absent/null without imports");
+    }
+}
+
+// --- --batch --ndjson tests ---
+
+#[test]
+fn batch_ndjson_processes_pe_files() {
+    let dir = std::env::temp_dir().join(format!("petriage_batch_test_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+
+    // Write 2 minimal PEs and 1 non-PE file
+    let pe_data = build_minimal_pe_with_cert_dd(0, 0);
+    std::fs::write(dir.join("file1.exe"), &pe_data).unwrap();
+    std::fs::write(dir.join("file2.dll"), &pe_data).unwrap();
+    std::fs::write(dir.join("readme.txt"), b"not a PE file").unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_petriage"))
+        .args(["--ndjson", "--batch"])
+        .arg(&dir)
+        .output()
+        .expect("failed to run petriage");
+
+    // Cleanup
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert_eq!(output.status.code(), Some(0), "batch should exit 0");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines.len(), 2, "should have 2 NDJSON lines (2 PE files), got {}", lines.len());
+    for line in &lines {
+        let parsed: Result<serde_json::Value, _> = serde_json::from_str(line);
+        assert!(parsed.is_ok(), "each NDJSON line should be valid JSON: {}", line);
+    }
+}
+
+// --- --fail-on tests ---
+
+#[test]
+fn fail_on_info_exits_3_with_anomalies() {
+    // Minimal PE that triggers at least one info-level anomaly (e.g., no CFG)
+    let data = build_minimal_pe_with_cert_dd(0, 0);
+    let output = petriage_run_with_args(&data, &["--json", "--fail-on", "info"]);
+    // This PE has anomalies (no ASLR/DEP/CFG, timestamp=0, etc.)
+    assert_eq!(output.status.code(), Some(3),
+        "should exit 3 when anomalies match --fail-on info");
+}
+
+#[test]
+fn fail_on_critical_exits_0_without_critical() {
+    // Minimal PE — typically no critical anomalies (no high entropy, no W^X)
+    let mut data = vec![0u8; 1024];
+    data[0] = b'M'; data[1] = b'Z';
+    data[0x3C] = 0x80;
+    data[0x80] = b'P'; data[0x81] = b'E';
+    data[0x84] = 0x4c; data[0x85] = 0x01;
+    data[0x86] = 0; // 0 sections → no section-based critical anomalies
+    data[0x94] = 0xe0;
+    data[0x96] = 0x02; data[0x97] = 0x01;
+    data[0x98] = 0x0b; data[0x99] = 0x01;
+    // Set DLL characteristics to include ASLR+DEP to avoid those anomalies triggering as critical
+    // DllCharacteristics at offset 0xDE (0x98 + 0x46)
+    data[0xDE..0xE0].copy_from_slice(&0x0160u16.to_le_bytes()); // DYNAMIC_BASE | NX_COMPAT | TERMINAL_SERVER_AWARE
+    let output = petriage_run_with_args(&data, &["--json", "--fail-on", "critical"]);
+    let code = output.status.code().unwrap();
+    assert!(code == 0, "should exit 0 when no critical anomalies, got exit code {}", code);
+}
+
+// --- --batch -o (output file) tests ---
+
+#[test]
+fn batch_json_output_file() {
+    let dir = std::env::temp_dir().join(format!("petriage_batch_json_o_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let pe_data = build_minimal_pe_with_cert_dd(0, 0);
+    std::fs::write(dir.join("a.exe"), &pe_data).unwrap();
+    std::fs::write(dir.join("b.exe"), &pe_data).unwrap();
+
+    let out_file = std::env::temp_dir().join(format!("petriage_batch_out_{}.json", std::process::id()));
+
+    let output = Command::new(env!("CARGO_BIN_EXE_petriage"))
+        .args(["--batch"])
+        .arg(&dir)
+        .args(["--json", "-o"])
+        .arg(&out_file)
+        .output()
+        .expect("failed to run petriage");
+
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert_eq!(output.status.code(), Some(0), "batch --json -o should exit 0");
+    assert!(out_file.exists(), "output file should be created");
+
+    let content = std::fs::read_to_string(&out_file).expect("should read output file");
+    let _ = std::fs::remove_file(&out_file);
+
+    let val: serde_json::Value = serde_json::from_str(&content)
+        .expect("output file should be valid JSON");
+    let arr = val.as_array().expect("JSON should be an array");
+    assert_eq!(arr.len(), 2, "should have 2 results in JSON array");
+
+    // stdout should NOT contain the JSON (it went to the file)
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(!stdout.contains("[{"), "JSON should not be on stdout when -o is used");
+}
+
+#[test]
+fn batch_ndjson_output_file() {
+    let dir = std::env::temp_dir().join(format!("petriage_batch_ndjson_o_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let pe_data = build_minimal_pe_with_cert_dd(0, 0);
+    std::fs::write(dir.join("x.exe"), &pe_data).unwrap();
+    std::fs::write(dir.join("y.exe"), &pe_data).unwrap();
+    std::fs::write(dir.join("not_pe.txt"), b"hello").unwrap();
+
+    let out_file = std::env::temp_dir().join(format!("petriage_batch_out_{}.ndjson", std::process::id()));
+
+    let output = Command::new(env!("CARGO_BIN_EXE_petriage"))
+        .args(["--batch"])
+        .arg(&dir)
+        .args(["--ndjson", "-o"])
+        .arg(&out_file)
+        .output()
+        .expect("failed to run petriage");
+
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert_eq!(output.status.code(), Some(0), "batch --ndjson -o should exit 0");
+    assert!(out_file.exists(), "output file should be created");
+
+    let content = std::fs::read_to_string(&out_file).expect("should read output file");
+    let _ = std::fs::remove_file(&out_file);
+
+    let lines: Vec<&str> = content.lines().collect();
+    assert_eq!(lines.len(), 2, "should have 2 NDJSON lines, got {}", lines.len());
+    for line in &lines {
+        let parsed: Result<serde_json::Value, _> = serde_json::from_str(line);
+        assert!(parsed.is_ok(), "each line should be valid JSON: {}", line);
+    }
+}
+
+#[test]
+fn batch_output_write_failure_exits_2() {
+    let dir = std::env::temp_dir().join(format!("petriage_batch_wf_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let pe_data = build_minimal_pe_with_cert_dd(0, 0);
+    std::fs::write(dir.join("a.exe"), &pe_data).unwrap();
+
+    // Use a path that cannot be written (directory that doesn't exist)
+    let bad_path = std::path::PathBuf::from("/nonexistent_dir_12345/output.json");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_petriage"))
+        .args(["--batch"])
+        .arg(&dir)
+        .args(["--json", "-o"])
+        .arg(&bad_path)
+        .output()
+        .expect("failed to run petriage");
+
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert_eq!(output.status.code(), Some(2),
+        "should exit 2 on write failure, got {}", output.status.code().unwrap());
+}

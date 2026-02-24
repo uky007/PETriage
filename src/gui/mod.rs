@@ -187,6 +187,7 @@ impl ReadpeApp {
                             show_overlay: self.options.show_overlay,
                             show_resources: self.options.show_resources,
                             show_authenticode: self.options.show_authenticode,
+                            show_all: true,
                             min_str_len: self.options.min_str_len,
                             file_name: file_name.clone(),
                         };
@@ -227,6 +228,7 @@ impl ReadpeApp {
                         show_overlay: self.options.show_overlay,
                         show_resources: self.options.show_resources,
                         show_authenticode: self.options.show_authenticode,
+                        show_all: true,
                         min_str_len: self.options.min_str_len,
                         file_name: file_name.clone(),
                     };
@@ -504,6 +506,9 @@ impl eframe::App for ReadpeApp {
                                             Tab::Strings => panels::strings::show(ui, &result, &mut self.strings_state),
                                             Tab::Overlay => panels::overlay::show(ui, &result),
                                             Tab::Resources => panels::resources::show(ui, &result, &self.icon_cache.all_icons),
+                                            Tab::RichHeader => panels::rich_header::show(ui, &result),
+                                            Tab::Tls => panels::tls::show(ui, &result),
+                                            Tab::Debug => panels::debug::show(ui, &result),
                                             Tab::Authenticode => panels::authenticode::show(ui, &result),
                                         }
                                     });

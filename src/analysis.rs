@@ -19,6 +19,7 @@ pub struct AnalysisOptions {
     pub show_overlay: bool,
     pub show_resources: bool,
     pub show_authenticode: bool,
+    pub show_all: bool,
     pub min_str_len: usize,
     pub file_name: String,
 }
@@ -49,6 +50,12 @@ pub struct AnalysisResult {
     pub resources: Option<ResourceInfo>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub authenticode: Option<AuthenticodeInfo>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rich_header: Option<RichHeaderInfo>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tls: Option<TlsInfo>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub debug: Option<DebugInfo>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub suspicious_summary: Option<SuspiciousSummary>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -188,6 +195,8 @@ pub struct HashInfo {
     pub md5: String,
     pub sha1: String,
     pub sha256: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub imphash: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -291,6 +300,54 @@ pub struct CertificateEntry {
     pub is_signer: bool,
 }
 
+#[derive(Clone, Debug, Serialize)]
+pub struct RichHeaderInfo {
+    pub xor_key: String,
+    pub xor_key_raw: u32,
+    pub entries: Vec<RichEntry>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct RichEntry {
+    pub build_id: u16,
+    pub prod_id: u16,
+    pub count: u32,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct TlsInfo {
+    pub raw_data_start: String,
+    pub raw_data_end: String,
+    pub address_of_index: String,
+    pub address_of_callbacks: String,
+    pub size_of_zero_fill: u32,
+    pub characteristics: u32,
+    pub callbacks: Vec<String>,
+    pub callback_count: usize,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct DebugInfo {
+    pub entries: Vec<DebugEntry>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct DebugEntry {
+    pub debug_type: String,
+    pub debug_type_raw: u32,
+    pub timestamp: u32,
+    pub major_version: u16,
+    pub minor_version: u16,
+    pub size_of_data: u32,
+    pub pointer_to_raw_data: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pdb_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub guid: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub age: Option<u32>,
+}
+
 pub fn analyze(data: &[u8], pe: &PE, opts: &AnalysisOptions) -> AnalysisResult {
     let pe_type = if pe.is_64 { "PE32+ (64-bit)" } else { "PE32 (32-bit)" }.to_string();
 
@@ -342,11 +399,14 @@ pub fn analyze(data: &[u8], pe: &PE, opts: &AnalysisOptions) -> AnalysisResult {
         None
     };
 
-    let hashes = if opts.show_hashes {
+    let mut hashes = if opts.show_hashes {
         Some(compute_hashes(data))
     } else {
         None
     };
+    if let Some(ref mut h) = hashes {
+        h.imphash = compute_imphash(pe);
+    }
 
     let overlay = if opts.show_overlay {
         Some(detect_overlay(data, pe))
@@ -365,6 +425,10 @@ pub fn analyze(data: &[u8], pe: &PE, opts: &AnalysisOptions) -> AnalysisResult {
     } else {
         None
     };
+
+    let rich_header = if opts.show_all { parse_rich_header(data) } else { None };
+    let tls = if opts.show_all { parse_tls(data, pe) } else { None };
+    let debug = if opts.show_all { parse_debug(data, pe) } else { None };
 
     let suspicious_summary = imports.as_ref().map(|imp| build_suspicious_summary(imp));
 
@@ -385,6 +449,9 @@ pub fn analyze(data: &[u8], pe: &PE, opts: &AnalysisOptions) -> AnalysisResult {
         overlay,
         resources,
         authenticode,
+        rich_header,
+        tls,
+        debug,
         suspicious_summary,
         anomalies,
     }
@@ -1292,7 +1359,33 @@ fn compute_hashes(data: &[u8]) -> HashInfo {
         md5: md5_result,
         sha1: sha1_result,
         sha256: sha256_result,
+        imphash: None,
     }
+}
+
+fn compute_imphash(pe: &PE) -> Option<String> {
+    let mut parts: Vec<String> = Vec::new();
+    for import in &pe.imports {
+        let dll_raw = import.dll.to_lowercase();
+        let dll = dll_raw
+            .strip_suffix(".dll")
+            .or_else(|| dll_raw.strip_suffix(".ocx"))
+            .or_else(|| dll_raw.strip_suffix(".sys"))
+            .unwrap_or(&dll_raw);
+        let func = if import.name.is_empty() {
+            format!("ord{}", import.ordinal)
+        } else {
+            import.name.to_lowercase()
+        };
+        parts.push(format!("{}.{}", dll, func));
+    }
+    if parts.is_empty() {
+        return None;
+    }
+    let joined = parts.join(",");
+    let mut hasher = Md5::new();
+    Digest::update(&mut hasher, joined.as_bytes());
+    Some(format!("{:x}", hasher.finalize()))
 }
 
 fn detect_overlay(data: &[u8], pe: &PE) -> OverlayInfo {
@@ -1422,6 +1515,16 @@ fn read_u32_le(data: &[u8], offset: usize) -> u32 {
         return 0;
     }
     u32::from_le_bytes([data[offset], data[offset + 1], data[offset + 2], data[offset + 3]])
+}
+
+fn read_u64_le(data: &[u8], offset: usize) -> u64 {
+    if offset + 8 > data.len() {
+        return 0;
+    }
+    u64::from_le_bytes([
+        data[offset], data[offset + 1], data[offset + 2], data[offset + 3],
+        data[offset + 4], data[offset + 5], data[offset + 6], data[offset + 7],
+    ])
 }
 
 fn read_utf16_string(data: &[u8], offset: usize, char_count: usize) -> Option<String> {
@@ -2383,4 +2486,309 @@ fn format_current_utc() -> String {
     }
     let d = remaining_days + 1;
     format!("{:04}-{:02}-{:02} {:02}:{:02}:{:02} UTC", y, m, d, hours, minutes, seconds_val)
+}
+
+// --- Rich Header parsing ---
+
+fn parse_rich_header(data: &[u8]) -> Option<RichHeaderInfo> {
+    if data.len() < 0x40 {
+        return None;
+    }
+    let e_lfanew = read_u32_le(data, 0x3C) as usize;
+    if e_lfanew < 0x80 || e_lfanew > data.len() {
+        return None;
+    }
+
+    // Scan for "Rich" marker (0x68636952) in the region between 0x80 and e_lfanew
+    let scan_start = 0x80;
+    let scan_end = e_lfanew;
+    if scan_end <= scan_start || scan_end > data.len() {
+        return None;
+    }
+
+    let mut rich_offset = None;
+    let mut pos = scan_start;
+    while pos + 4 <= scan_end {
+        if read_u32_le(data, pos) == 0x68636952 {
+            rich_offset = Some(pos);
+            break;
+        }
+        pos += 4;
+    }
+    let rich_offset = rich_offset?;
+
+    // XOR key is the 4 bytes right after "Rich"
+    if rich_offset + 8 > data.len() {
+        return None;
+    }
+    let xor_key = read_u32_le(data, rich_offset + 4);
+
+    // Decode backwards from Rich to find DanS (0x536E6144)
+    // The decoded region starts at scan_start (0x80)
+    let encoded_start = scan_start;
+    let encoded_end = rich_offset;
+    if encoded_end <= encoded_start {
+        return None;
+    }
+
+    // Verify DanS signature
+    let first_dword = read_u32_le(data, encoded_start) ^ xor_key;
+    if first_dword != 0x536E6144 {
+        return None;
+    }
+
+    // Skip DanS + 3 padding dwords (16 bytes total)
+    let entries_start = encoded_start + 16;
+    if entries_start >= encoded_end {
+        return Some(RichHeaderInfo {
+            xor_key: format!("{:#010x}", xor_key),
+            xor_key_raw: xor_key,
+            entries: Vec::new(),
+        });
+    }
+
+    let mut entries = Vec::new();
+    let mut off = entries_start;
+    while off + 8 <= encoded_end {
+        let comp_id = read_u32_le(data, off) ^ xor_key;
+        let count = read_u32_le(data, off + 4) ^ xor_key;
+        let build_id = (comp_id & 0xFFFF) as u16;
+        let prod_id = ((comp_id >> 16) & 0xFFFF) as u16;
+        entries.push(RichEntry { build_id, prod_id, count });
+        off += 8;
+    }
+
+    Some(RichHeaderInfo {
+        xor_key: format!("{:#010x}", xor_key),
+        xor_key_raw: xor_key,
+        entries,
+    })
+}
+
+// --- TLS Directory parsing ---
+
+fn parse_tls(data: &[u8], pe: &PE) -> Option<TlsInfo> {
+    let opt = pe.header.optional_header.as_ref()?;
+    let (rva, size) = match opt.data_directories.data_directories.get(9) {
+        Some(Some((_, dd))) => (dd.virtual_address, dd.size),
+        _ => (0, 0),
+    };
+    if rva == 0 || size == 0 {
+        return None;
+    }
+
+    let tls_offset = rva_to_offset(rva, pe, data.len())?;
+    let image_base = opt.windows_fields.image_base;
+
+    if pe.is_64 {
+        // PE32+: pointers are 8 bytes, struct is 40 bytes
+        if tls_offset + 40 > data.len() {
+            return None;
+        }
+        let raw_data_start = read_u64_le(data, tls_offset);
+        let raw_data_end = read_u64_le(data, tls_offset + 8);
+        let address_of_index = read_u64_le(data, tls_offset + 16);
+        let address_of_callbacks = read_u64_le(data, tls_offset + 24);
+        let size_of_zero_fill = read_u32_le(data, tls_offset + 32);
+        let characteristics = read_u32_le(data, tls_offset + 36);
+
+        let callbacks = read_tls_callbacks_64(data, pe, address_of_callbacks, image_base);
+        let callback_count = callbacks.len();
+
+        Some(TlsInfo {
+            raw_data_start: format!("{:#x}", raw_data_start),
+            raw_data_end: format!("{:#x}", raw_data_end),
+            address_of_index: format!("{:#x}", address_of_index),
+            address_of_callbacks: format!("{:#x}", address_of_callbacks),
+            size_of_zero_fill,
+            characteristics,
+            callbacks,
+            callback_count,
+        })
+    } else {
+        // PE32: pointers are 4 bytes, struct is 24 bytes
+        if tls_offset + 24 > data.len() {
+            return None;
+        }
+        let raw_data_start = read_u32_le(data, tls_offset) as u64;
+        let raw_data_end = read_u32_le(data, tls_offset + 4) as u64;
+        let address_of_index = read_u32_le(data, tls_offset + 8) as u64;
+        let address_of_callbacks = read_u32_le(data, tls_offset + 12) as u64;
+        let size_of_zero_fill = read_u32_le(data, tls_offset + 16);
+        let characteristics = read_u32_le(data, tls_offset + 20);
+
+        let callbacks = read_tls_callbacks_32(data, pe, address_of_callbacks as u32, image_base as u32);
+        let callback_count = callbacks.len();
+
+        Some(TlsInfo {
+            raw_data_start: format!("{:#x}", raw_data_start),
+            raw_data_end: format!("{:#x}", raw_data_end),
+            address_of_index: format!("{:#x}", address_of_index),
+            address_of_callbacks: format!("{:#x}", address_of_callbacks),
+            size_of_zero_fill,
+            characteristics,
+            callbacks,
+            callback_count,
+        })
+    }
+}
+
+fn read_tls_callbacks_64(data: &[u8], pe: &PE, callbacks_va: u64, image_base: u64) -> Vec<String> {
+    let mut result = Vec::new();
+    if callbacks_va == 0 || callbacks_va < image_base {
+        return result;
+    }
+    let callbacks_rva = (callbacks_va - image_base) as u32;
+    let Some(offset) = rva_to_offset(callbacks_rva, pe, data.len()) else {
+        return result;
+    };
+    let mut pos = offset;
+    for _ in 0..256 {
+        if pos + 8 > data.len() {
+            break;
+        }
+        let cb = read_u64_le(data, pos);
+        if cb == 0 {
+            break;
+        }
+        result.push(format!("{:#x}", cb));
+        pos += 8;
+    }
+    result
+}
+
+fn read_tls_callbacks_32(data: &[u8], pe: &PE, callbacks_va: u32, image_base: u32) -> Vec<String> {
+    let mut result = Vec::new();
+    if callbacks_va == 0 || callbacks_va < image_base {
+        return result;
+    }
+    let callbacks_rva = callbacks_va - image_base;
+    let Some(offset) = rva_to_offset(callbacks_rva, pe, data.len()) else {
+        return result;
+    };
+    let mut pos = offset;
+    for _ in 0..256 {
+        if pos + 4 > data.len() {
+            break;
+        }
+        let cb = read_u32_le(data, pos);
+        if cb == 0 {
+            break;
+        }
+        result.push(format!("{:#x}", cb));
+        pos += 4;
+    }
+    result
+}
+
+// --- Debug Directory parsing ---
+
+fn parse_debug(data: &[u8], pe: &PE) -> Option<DebugInfo> {
+    let opt = pe.header.optional_header.as_ref()?;
+    let (rva, size) = match opt.data_directories.data_directories.get(6) {
+        Some(Some((_, dd))) => (dd.virtual_address, dd.size),
+        _ => (0, 0),
+    };
+    if rva == 0 || size == 0 {
+        return None;
+    }
+
+    let debug_offset = rva_to_offset(rva, pe, data.len())?;
+    let entry_count = (size as usize / 28).min(32);
+    if entry_count == 0 {
+        return None;
+    }
+
+    let mut entries = Vec::new();
+    for i in 0..entry_count {
+        let base = debug_offset + i * 28;
+        if base + 28 > data.len() {
+            break;
+        }
+
+        let timestamp = read_u32_le(data, base + 4);
+        let major_version = read_u16_le(data, base + 8);
+        let minor_version = read_u16_le(data, base + 10);
+        let debug_type_raw = read_u32_le(data, base + 12);
+        let size_of_data = read_u32_le(data, base + 16);
+        let _address_of_raw_data = read_u32_le(data, base + 20);
+        let pointer_to_raw_data = read_u32_le(data, base + 24);
+
+        let debug_type = match debug_type_raw {
+            0 => "Unknown",
+            1 => "COFF",
+            2 => "CodeView",
+            3 => "FPO",
+            4 => "Misc",
+            5 => "Exception",
+            6 => "Fixup",
+            9 => "Borland",
+            12 => "VC_FEATURE",
+            13 => "POGO",
+            14 => "ILTCG",
+            16 => "Repro",
+            20 => "Ex DLL Characteristics",
+            _ => "Unknown",
+        }.to_string();
+
+        let mut pdb_path = None;
+        let mut guid = None;
+        let mut age = None;
+
+        // Parse CodeView (RSDS) data
+        if debug_type_raw == 2 && pointer_to_raw_data > 0 && size_of_data >= 24 {
+            let cv_offset = pointer_to_raw_data as usize;
+            if cv_offset + 24 <= data.len() {
+                let sig = read_u32_le(data, cv_offset);
+                if sig == 0x53445352 {
+                    // RSDS signature confirmed
+                    // GUID: 16 bytes at cv_offset+4
+                    let data1 = read_u32_le(data, cv_offset + 4);
+                    let data2 = read_u16_le(data, cv_offset + 8);
+                    let data3 = read_u16_le(data, cv_offset + 10);
+                    let mut data4 = [0u8; 8];
+                    if cv_offset + 20 <= data.len() {
+                        data4.copy_from_slice(&data[cv_offset + 12..cv_offset + 20]);
+                    }
+                    guid = Some(format!(
+                        "{:08X}-{:04X}-{:04X}-{:02X}{:02X}-{:02X}{:02X}{:02X}{:02X}{:02X}{:02X}",
+                        data1, data2, data3,
+                        data4[0], data4[1],
+                        data4[2], data4[3], data4[4], data4[5], data4[6], data4[7]
+                    ));
+
+                    // Age: u32 at cv_offset+20
+                    age = Some(read_u32_le(data, cv_offset + 20));
+
+                    // PDB path: null-terminated UTF-8 starting at cv_offset+24
+                    let pdb_start = cv_offset + 24;
+                    let pdb_end = (cv_offset + size_of_data as usize).min(data.len());
+                    if pdb_start < pdb_end {
+                        let pdb_bytes = &data[pdb_start..pdb_end];
+                        let null_pos = pdb_bytes.iter().position(|&b| b == 0).unwrap_or(pdb_bytes.len());
+                        pdb_path = Some(String::from_utf8_lossy(&pdb_bytes[..null_pos]).to_string());
+                    }
+                }
+            }
+        }
+
+        entries.push(DebugEntry {
+            debug_type,
+            debug_type_raw,
+            timestamp,
+            major_version,
+            minor_version,
+            size_of_data,
+            pointer_to_raw_data,
+            pdb_path,
+            guid,
+            age,
+        });
+    }
+
+    if entries.is_empty() {
+        return None;
+    }
+
+    Some(DebugInfo { entries })
 }

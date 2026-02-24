@@ -6,4 +6,7 @@ pub mod exports;
 pub mod strings;
 pub mod overlay;
 pub mod resources;
+pub mod rich_header;
+pub mod tls;
+pub mod debug;
 pub mod authenticode;

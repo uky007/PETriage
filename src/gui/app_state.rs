@@ -10,6 +10,9 @@ pub enum Tab {
     Strings,
     Overlay,
     Resources,
+    RichHeader,
+    Tls,
+    Debug,
     Authenticode,
 }
 
@@ -23,6 +26,9 @@ impl Tab {
         Tab::Strings,
         Tab::Overlay,
         Tab::Resources,
+        Tab::RichHeader,
+        Tab::Tls,
+        Tab::Debug,
         Tab::Authenticode,
     ];
 
@@ -36,6 +42,9 @@ impl Tab {
             Tab::Strings => "Strings",
             Tab::Overlay => "Overlay",
             Tab::Resources => "Resources",
+            Tab::RichHeader => "Rich",
+            Tab::Tls => "TLS",
+            Tab::Debug => "Debug",
             Tab::Authenticode => "Signing",
         }
     }

@@ -24,6 +24,12 @@ pub fn format_json(result: &AnalysisResult) -> String {
     serde_json::to_string_pretty(result).unwrap_or_else(|e| format!("JSON error: {}", e))
 }
 
+pub fn format_ndjson(result: &AnalysisResult) -> String {
+    let mut s = serde_json::to_string(result).unwrap_or_else(|e| format!("{{\"error\":\"JSON error: {}\"}}", e));
+    s.push('\n');
+    s
+}
+
 pub fn format_text(result: &AnalysisResult) -> String {
     let mut out = String::new();
 
@@ -40,6 +46,9 @@ pub fn format_text(result: &AnalysisResult) -> String {
         out.push_str(&format!("  MD5:     {}\n", hashes.md5));
         out.push_str(&format!("  SHA1:    {}\n", hashes.sha1));
         out.push_str(&format!("  SHA256:  {}\n", hashes.sha256));
+        if let Some(ref imphash) = hashes.imphash {
+            out.push_str(&format!("  Imphash: {}\n", imphash));
+        }
         out.push('\n');
     }
 
@@ -200,6 +209,55 @@ pub fn format_text(result: &AnalysisResult) -> String {
             out.push_str(&format!("  Size:     {} bytes ({:.2} KB)\n", overlay.size, overlay.size as f64 / 1024.0));
         } else {
             out.push_str(&format!("  Present:  No\n"));
+        }
+        out.push('\n');
+    }
+
+    if let Some(ref rich) = result.rich_header {
+        out.push_str(&format!("=== Rich Header ===\n"));
+        out.push_str(&format!("  XOR Key:  {}\n", rich.xor_key));
+        if !rich.entries.is_empty() {
+            out.push_str(&format!("\n  {:<8} {:<8} {:>8}\n", "ProdID", "BuildID", "Count"));
+            out.push_str(&format!("  {:-<8} {:-<8} {:-<8}\n", "", "", ""));
+            for e in &rich.entries {
+                out.push_str(&format!("  {:<8} {:<8} {:>8}\n", e.prod_id, e.build_id, e.count));
+            }
+        }
+        out.push('\n');
+    }
+
+    if let Some(ref tls) = result.tls {
+        out.push_str("=== TLS Directory ===\n");
+        out.push_str(&format!("  RawDataStart:       {}\n", tls.raw_data_start));
+        out.push_str(&format!("  RawDataEnd:         {}\n", tls.raw_data_end));
+        out.push_str(&format!("  AddressOfIndex:     {}\n", tls.address_of_index));
+        out.push_str(&format!("  AddressOfCallBacks: {}\n", tls.address_of_callbacks));
+        out.push_str(&format!("  SizeOfZeroFill:     {:#x}\n", tls.size_of_zero_fill));
+        out.push_str(&format!("  Characteristics:    {:#x}\n", tls.characteristics));
+        out.push_str(&format!("  Callbacks:          {}\n", tls.callback_count));
+        for (i, cb) in tls.callbacks.iter().enumerate() {
+            out.push_str(&format!("    [{}] {}\n", i, cb));
+        }
+        out.push('\n');
+    }
+
+    if let Some(ref debug) = result.debug {
+        out.push_str(&format!("=== Debug Directory ({} entries) ===\n", debug.entries.len()));
+        for (i, entry) in debug.entries.iter().enumerate() {
+            out.push_str(&format!("  [{}] Type: {} ({})\n", i, entry.debug_type, entry.debug_type_raw));
+            out.push_str(&format!("      Timestamp:       {:#010x}\n", entry.timestamp));
+            out.push_str(&format!("      Version:         {}.{}\n", entry.major_version, entry.minor_version));
+            out.push_str(&format!("      SizeOfData:      {:#x}\n", entry.size_of_data));
+            out.push_str(&format!("      PointerToRawData:{:#x}\n", entry.pointer_to_raw_data));
+            if let Some(ref guid) = entry.guid {
+                out.push_str(&format!("      GUID:            {}\n", guid));
+            }
+            if let Some(age) = entry.age {
+                out.push_str(&format!("      Age:             {}\n", age));
+            }
+            if let Some(ref pdb) = entry.pdb_path {
+                out.push_str(&format!("      PDB:             {}\n", pdb));
+            }
         }
         out.push('\n');
     }
