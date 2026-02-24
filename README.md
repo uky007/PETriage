@@ -34,6 +34,7 @@ Malware analysts frequently examine Windows PE files, but the most capable surfa
 | Suspicious API Indicators | Auto-tags ~130 Windows APIs across 12 risk categories (Process Injection, Code Execution, Network, Evasion, etc.) with severity levels (high/medium/low) |
 | Anomaly Detection | 18 heuristic rules detecting packing indicators, W^X violations, missing security features (ASLR/DEP/CFG), timestamp anomalies, structural irregularities, and suspicious API combos |
 | Resource Directory | Resource tree enumeration, VS_VERSIONINFO parsing (FileVersion, CompanyName, OriginalFilename, etc.), manifest extraction (UAC requestedExecutionLevel), embedded icon extraction and display (GUI) |
+| Authenticode | Digital signature presence detection, PKCS#7/CMS parsing, X.509 certificate chain extraction (subject, issuer, serial, validity, SHA-1 thumbprint), signer identification, expiry/self-signed/chain warnings. Cross-platform — no Windows CryptoAPI required. Trust verification is not performed. |
 | Output | Human-readable tables (default) or JSON (`--json`), file output (`-o`) |
 | TUI Hex Viewer | Interactive terminal hex viewer with region navigation — select PE structures (DOS Header, COFF, sections, overlay) and browse hex dumps with keyboard scrolling (opt-in via `--features tui`) |
 | GUI | egui-based GUI with tabbed views, drag & drop, filters, entropy color-coding, suspicious API highlighting, embedded icon display (opt-in via `--features gui`) |
@@ -90,6 +91,7 @@ petriage <file.exe> -S           # Strings only
 petriage <file.exe> --hashes     # File hashes only
 petriage <file.exe> --overlay    # Overlay only
 petriage <file.exe> -r           # Resources only
+petriage <file.exe> -c           # Authenticode / code signing info
 petriage <file.exe> --json       # JSON output
 petriage <file.exe> --json | jq '.suspicious_summary'              # Suspicious API summary
 petriage <file.exe> --json | jq '.imports[].functions[] | select(.risk != null)'  # Risky APIs only
@@ -98,6 +100,8 @@ petriage <file.exe> --json | jq '.anomalies[] | select(.severity == "critical")'
 petriage <file.exe> --json | jq '.resources'                                     # Resources
 petriage <file.exe> --json | jq '.resources.version_info'                        # Version info
 petriage <file.exe> --json | jq '.resources.manifest'                            # Manifest XML
+petriage <file.exe> --json | jq '.authenticode'                                  # Authenticode info
+petriage <file.exe> --json | jq '.authenticode.signer'                           # Signer certificate
 petriage <file.exe> -o report.txt  # Write to file
 ```
 
@@ -125,7 +129,7 @@ petriage --gui <file.exe>        # Open file directly in GUI
 
 The GUI provides:
 
-- **Tabbed interface** — File Info, Headers, Sections, Imports, Exports, Strings, Overlay, Resources
+- **Tabbed interface** — File Info, Headers, Sections, Imports, Exports, Strings, Overlay, Resources, Signing
 - **Drag & drop** — Drop PE files onto the window to analyze
 - **Left sidebar** — Toggle analysis options and re-analyze without restarting
 - **Import filter** — Search API names across DLLs, "Suspicious only" toggle to surface risky APIs
@@ -230,6 +234,35 @@ The GUI provides:
   RT_VERSION           #1               en-US           836 0x00003c000
   RT_MANIFEST          #1               en-US           522 0x00003d000
   ...
+
+=== Authenticode / Code Signing ===
+  Signed:          Yes
+  Parse OK:        Yes
+  Trust Verified:  No (not implemented)
+
+  WIN_CERTIFICATE:
+    Length:   9640 bytes
+    Revision: WIN_CERT_REVISION_2_0 (0x0200)
+    Type:     WIN_CERT_TYPE_PKCS_SIGNED_DATA (0x0002)
+
+  Signer:
+    Subject:    Microsoft Corporation
+    Issuer:     Microsoft Code Signing PCA 2011
+    Serial:     33:00:00:01:c4:22:b2:f7:9b:18:54:...
+    Not Before: 2023-05-18 18:09:06 UTC
+    Not After:  2024-05-16 18:09:06 UTC
+    Thumbprint: a1:b2:c3:d4:e5:f6:...
+
+  Certificate Chain (3 certificates):
+    [0] (signer)
+      Subject:    Microsoft Corporation
+      ...
+    [1]
+      Subject:    Microsoft Code Signing PCA 2011
+      ...
+    [2]
+      Subject:    Microsoft Root Certificate Authority 2011
+      ...
 ```
 
 ## Exit Codes
@@ -250,13 +283,15 @@ When `--json` is used, errors are output to stderr as JSON: `{"error": "message"
 - **Import by ordinal**: Deferred to goblin's output; ordinal-only imports may show as empty names.
 - **String extraction**: Capped at 100,000 strings to prevent excessive memory usage on large files.
 - **Malformed PEs**: Arithmetic operations on PE header fields use checked arithmetic to avoid panics on crafted inputs. goblin may silently accept structurally invalid files without error. Fuzz testing with adversarial PEs is ongoing.
+- **Authenticode trust verification**: Signature parsing and certificate extraction are supported, but trust verification (chain validation against a root store) is not performed. `trust_verified` is always `false`.
+- **Authenticode dual-signing**: Only the first WIN_CERTIFICATE entry and first SignerInfo are processed. Dual-signed PEs (e.g., SHA-1 + SHA-256) will only show one signature.
 - **Rich header, TLS, Debug, Load Config directories**: Not yet implemented.
 - **RVA-to-offset conversion**: Validated with overflow checks and file boundary verification; however, PEs with unusual section layouts may produce incorrect mappings.
 
 ## Roadmap
 
 - **v0.2**: Rich header, TLS/Debug directories, imphash, packer detection
-- **v0.3**: .NET metadata, Authenticode signatures, entropy histogram
+- **v0.3**: .NET metadata, entropy histogram
 - **Future**: ELF format support
 
 ## License

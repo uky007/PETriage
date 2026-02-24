@@ -383,3 +383,371 @@ fn export_ordinal_structure_valid() {
         assert!(exp.get("rva").is_some(), "export missing rva field: {:?}", exp);
     }
 }
+
+// --- Authenticode tests ---
+
+fn petriage_run_with_args(data: &[u8], extra_args: &[&str]) -> std::process::Output {
+    let id = COUNTER.fetch_add(1, Ordering::SeqCst);
+    let pid = std::process::id();
+    let dir = std::env::temp_dir();
+    let path = dir.join(format!("petriage_test_{}_{}.bin", pid, id));
+    std::fs::write(&path, data).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_petriage"))
+        .args(extra_args)
+        .arg(&path)
+        .output()
+        .expect("failed to run petriage");
+    let _ = std::fs::remove_file(&path);
+    output
+}
+
+/// Helper: build a minimal PE32 with an optional header that has 16 data directories,
+/// and enough room to set Certificate Table (DD[4]).
+fn build_minimal_pe_with_cert_dd(cert_offset: u32, cert_size: u32) -> Vec<u8> {
+    let mut data = vec![0u8; 1024];
+    data[0] = b'M'; data[1] = b'Z';
+    data[0x3C] = 0x80;
+    data[0x80] = b'P'; data[0x81] = b'E';
+    data[0x84] = 0x4c; data[0x85] = 0x01; // i386
+    data[0x86] = 1; // 1 section
+    data[0x94] = 0xe0; // SizeOfOptionalHeader
+    data[0x96] = 0x02; data[0x97] = 0x01; // EXECUTABLE_IMAGE
+    data[0x98] = 0x0b; data[0x99] = 0x01; // PE32
+    // ImageBase
+    data[0xB4..0xB8].copy_from_slice(&0x400000u32.to_le_bytes());
+    // SectionAlignment
+    data[0xB8..0xBC].copy_from_slice(&0x1000u32.to_le_bytes());
+    // FileAlignment
+    data[0xBC..0xC0].copy_from_slice(&0x200u32.to_le_bytes());
+    // SizeOfImage
+    data[0xD0..0xD4].copy_from_slice(&0x3000u32.to_le_bytes());
+    // SizeOfHeaders
+    data[0xD4..0xD8].copy_from_slice(&0x200u32.to_le_bytes());
+    // NumberOfRvaAndSizes = 16
+    data[0xF4..0xF8].copy_from_slice(&16u32.to_le_bytes());
+    // Data Directory[4] = Certificate Table (offset 0xF8 + 4*8 = 0x118)
+    let dd4_offset = 0xF8 + 4 * 8; // 0x118
+    data[dd4_offset..dd4_offset + 4].copy_from_slice(&cert_offset.to_le_bytes());
+    data[dd4_offset + 4..dd4_offset + 8].copy_from_slice(&cert_size.to_le_bytes());
+    // Section header at 0x178 (after optional header)
+    let sh = 0x178;
+    data[sh..sh + 6].copy_from_slice(b".text\0");
+    data[sh + 8..sh + 12].copy_from_slice(&0x1000u32.to_le_bytes()); // VirtualSize
+    data[sh + 12..sh + 16].copy_from_slice(&0x1000u32.to_le_bytes()); // VirtualAddress
+    data[sh + 16..sh + 20].copy_from_slice(&0x200u32.to_le_bytes()); // SizeOfRawData
+    data[sh + 20..sh + 24].copy_from_slice(&0x200u32.to_le_bytes()); // PointerToRawData
+    data[sh + 36..sh + 40].copy_from_slice(&0x60000020u32.to_le_bytes()); // CODE|EXECUTE|READ
+    data
+}
+
+#[test]
+fn authenticode_unsigned_pe() {
+    // PE with no Certificate Table → signed: false
+    let data = build_minimal_pe_with_cert_dd(0, 0);
+    let output = petriage_run_with_args(&data, &["--json", "-c"]);
+    if output.status.code() == Some(0) {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let val: serde_json::Value = serde_json::from_str(&stdout)
+            .expect("stdout should be valid JSON");
+        let auth = val.get("authenticode").expect("should have authenticode field");
+        assert_eq!(auth["signed"], false);
+        assert_eq!(auth["parse_ok"], false);
+        assert_eq!(auth["trust_verified"], false);
+    }
+}
+
+#[test]
+fn authenticode_truncated_cert_table() {
+    // Certificate Table points beyond file → signed: true, parse_ok: false
+    let data = build_minimal_pe_with_cert_dd(0x8000, 0x100);
+    let output = petriage_run_with_args(&data, &["--json", "-c"]);
+    if output.status.code() == Some(0) {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let val: serde_json::Value = serde_json::from_str(&stdout)
+            .expect("stdout should be valid JSON");
+        let auth = val.get("authenticode").expect("should have authenticode field");
+        assert_eq!(auth["signed"], true);
+        assert_eq!(auth["parse_ok"], false);
+        let warnings = auth["warnings"].as_array().expect("warnings should be array");
+        assert!(!warnings.is_empty(), "should have warning about bounds");
+    }
+}
+
+#[test]
+fn authenticode_wrong_cert_type() {
+    // Valid WIN_CERTIFICATE header but wrong wCertificateType → parse_ok: false
+    let mut data = build_minimal_pe_with_cert_dd(0x400, 0x20);
+    // Extend data to accommodate the certificate at offset 0x400
+    data.resize(0x420, 0);
+    // WIN_CERTIFICATE header at 0x400
+    data[0x400..0x404].copy_from_slice(&0x20u32.to_le_bytes()); // dwLength
+    data[0x404..0x406].copy_from_slice(&0x0200u16.to_le_bytes()); // wRevision
+    data[0x406..0x408].copy_from_slice(&0x0001u16.to_le_bytes()); // wCertificateType = X509, not PKCS
+    let output = petriage_run_with_args(&data, &["--json", "-c"]);
+    if output.status.code() == Some(0) {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let val: serde_json::Value = serde_json::from_str(&stdout)
+            .expect("stdout should be valid JSON");
+        let auth = val.get("authenticode").expect("should have authenticode field");
+        assert_eq!(auth["signed"], true);
+        assert_eq!(auth["parse_ok"], false);
+        // Should have win_certificate info
+        assert!(auth.get("win_certificate").is_some());
+    }
+}
+
+#[test]
+fn authenticode_garbage_pkcs7() {
+    // Correct cert type but garbage PKCS#7 data → parse_ok: false
+    let mut data = build_minimal_pe_with_cert_dd(0x400, 0x20);
+    data.resize(0x420, 0xAB); // fill with garbage
+    // WIN_CERTIFICATE header at 0x400
+    data[0x400..0x404].copy_from_slice(&0x20u32.to_le_bytes()); // dwLength
+    data[0x404..0x406].copy_from_slice(&0x0200u16.to_le_bytes()); // wRevision
+    data[0x406..0x408].copy_from_slice(&0x0002u16.to_le_bytes()); // PKCS_SIGNED_DATA
+    let output = petriage_run_with_args(&data, &["--json", "-c"]);
+    if output.status.code() == Some(0) {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let val: serde_json::Value = serde_json::from_str(&stdout)
+            .expect("stdout should be valid JSON");
+        let auth = val.get("authenticode").expect("should have authenticode field");
+        assert_eq!(auth["signed"], true);
+        assert_eq!(auth["parse_ok"], false);
+    }
+}
+
+#[test]
+fn no_panic_authenticode_overflow_length() {
+    // dwLength = 0xFFFFFFFF → should not panic
+    let mut data = build_minimal_pe_with_cert_dd(0x400, 0x20);
+    data.resize(0x420, 0);
+    data[0x400..0x404].copy_from_slice(&0xFFFFFFFFu32.to_le_bytes()); // dwLength
+    data[0x404..0x406].copy_from_slice(&0x0200u16.to_le_bytes());
+    data[0x406..0x408].copy_from_slice(&0x0002u16.to_le_bytes());
+    let output = petriage_run_with_args(&data, &["--json", "-c"]);
+    assert_no_panic(&output);
+}
+
+#[test]
+fn authenticode_dwlength_exceeds_cert_size() {
+    // dwLength (0x100) > cert_size (0x20) → parse_ok: false with specific warning
+    let mut data = build_minimal_pe_with_cert_dd(0x400, 0x20);
+    data.resize(0x420, 0);
+    // WIN_CERTIFICATE header at 0x400: dwLength=0x100 but DD[4] size is only 0x20
+    data[0x400..0x404].copy_from_slice(&0x100u32.to_le_bytes()); // dwLength > cert_size
+    data[0x404..0x406].copy_from_slice(&0x0200u16.to_le_bytes()); // wRevision
+    data[0x406..0x408].copy_from_slice(&0x0002u16.to_le_bytes()); // PKCS_SIGNED_DATA
+    let output = petriage_run_with_args(&data, &["--json", "-c"]);
+    if output.status.code() == Some(0) {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let val: serde_json::Value = serde_json::from_str(&stdout)
+            .expect("stdout should be valid JSON");
+        let auth = val.get("authenticode").expect("should have authenticode field");
+        assert_eq!(auth["signed"], true);
+        assert_eq!(auth["parse_ok"], false);
+        let warnings = auth["warnings"].as_array().expect("warnings should be array");
+        let has_dwlength_warning = warnings.iter().any(|w| {
+            w.as_str().map_or(false, |s| s.contains("dwLength") && s.contains("exceeds"))
+        });
+        assert!(has_dwlength_warning,
+            "should warn about dwLength exceeding cert_size, got: {:?}", warnings);
+    }
+}
+
+#[test]
+fn authenticode_wrong_content_type_oid() {
+    // Valid DER ContentInfo but with wrong OID (data instead of signedData)
+    // ContentInfo ::= SEQUENCE { contentType OID, content [0] EXPLICIT ANY }
+    // OID 1.2.840.113549.1.7.1 = id-data (wrong, should be 1.2.840.113549.1.7.2 = signedData)
+    let content_info_der: &[u8] = &[
+        0x30, 0x0F, // SEQUENCE, length 15
+        0x06, 0x09, // OID, length 9
+        0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x07, 0x01, // 1.2.840.113549.1.7.1 (id-data)
+        0xA0, 0x02, // [0] EXPLICIT, length 2
+        0x04, 0x00, // OCTET STRING, empty
+    ];
+    let cert_blob_len = content_info_der.len();
+    let win_cert_len = 8 + cert_blob_len; // WIN_CERTIFICATE header (8) + blob
+    let dd_size = win_cert_len as u32;
+    let mut data = build_minimal_pe_with_cert_dd(0x400, dd_size);
+    data.resize(0x400 + win_cert_len, 0);
+    // WIN_CERTIFICATE header
+    data[0x400..0x404].copy_from_slice(&(win_cert_len as u32).to_le_bytes());
+    data[0x404..0x406].copy_from_slice(&0x0200u16.to_le_bytes()); // wRevision
+    data[0x406..0x408].copy_from_slice(&0x0002u16.to_le_bytes()); // PKCS_SIGNED_DATA
+    // DER blob
+    data[0x408..0x408 + cert_blob_len].copy_from_slice(content_info_der);
+    let output = petriage_run_with_args(&data, &["--json", "-c"]);
+    if output.status.code() == Some(0) {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let val: serde_json::Value = serde_json::from_str(&stdout)
+            .expect("stdout should be valid JSON");
+        let auth = val.get("authenticode").expect("should have authenticode field");
+        assert_eq!(auth["signed"], true);
+        assert_eq!(auth["parse_ok"], false);
+        let warnings = auth["warnings"].as_array().expect("warnings should be array");
+        let has_oid_warning = warnings.iter().any(|w| {
+            w.as_str().map_or(false, |s| s.contains("content_type") && s.contains("signedData"))
+        });
+        assert!(has_oid_warning,
+            "should warn about wrong content_type OID, got: {:?}", warnings);
+    }
+}
+
+/// DER TLV (tag-length-value) encoder for constructing test fixtures
+fn der_tlv(tag: u8, content: &[u8]) -> Vec<u8> {
+    let mut out = vec![tag];
+    let len = content.len();
+    if len < 0x80 {
+        out.push(len as u8);
+    } else if len < 0x100 {
+        out.extend_from_slice(&[0x81, len as u8]);
+    } else {
+        out.extend_from_slice(&[0x82, (len >> 8) as u8, len as u8]);
+    }
+    out.extend_from_slice(content);
+    out
+}
+
+fn der_join(items: &[&[u8]]) -> Vec<u8> {
+    items.iter().flat_map(|i| i.iter().copied()).collect()
+}
+
+/// Build a minimal PE with a syntactically valid self-signed Authenticode signature.
+/// The certificate and CMS structures are valid DER parseable by cms/x509-cert crates.
+fn build_pe_with_valid_authenticode() -> Vec<u8> {
+    // OID encoded values (pre-computed per X.690 base-128 encoding)
+    let oid_sha256_rsa: &[u8] = &[0x2A,0x86,0x48,0x86,0xF7,0x0D,0x01,0x01,0x0B]; // 1.2.840.113549.1.1.11
+    let oid_rsa: &[u8]        = &[0x2A,0x86,0x48,0x86,0xF7,0x0D,0x01,0x01,0x01]; // 1.2.840.113549.1.1.1
+    let oid_cn: &[u8]         = &[0x55,0x04,0x03];                                 // 2.5.4.3
+    let oid_sha256: &[u8]     = &[0x60,0x86,0x48,0x01,0x65,0x03,0x04,0x02,0x01]; // 2.16.840.1.101.3.4.2.1
+    let oid_signed_data: &[u8]= &[0x2A,0x86,0x48,0x86,0xF7,0x0D,0x01,0x07,0x02]; // 1.2.840.113549.1.7.2
+    let oid_data: &[u8]       = &[0x2A,0x86,0x48,0x86,0xF7,0x0D,0x01,0x07,0x01]; // 1.2.840.113549.1.7.1
+
+    // Shorthand closures for DER construction
+    let oid = |v: &[u8]| der_tlv(0x06, v);
+    let seq = |items: &[&[u8]]| der_tlv(0x30, &der_join(items));
+    let set = |items: &[&[u8]]| der_tlv(0x31, &der_join(items));
+    let int = |v: &[u8]| -> Vec<u8> {
+        if !v.is_empty() && v[0] & 0x80 != 0 {
+            let mut c = vec![0x00]; c.extend_from_slice(v); der_tlv(0x02, &c)
+        } else { der_tlv(0x02, v) }
+    };
+    let utf8 = |s: &str| der_tlv(0x0C, s.as_bytes());
+    let bits = |c: &[u8]| { let mut v = vec![0x00]; v.extend_from_slice(c); der_tlv(0x03, &v) };
+    let octs = |c: &[u8]| der_tlv(0x04, c);
+    let null = || vec![0x05u8, 0x00];
+    let utctime = |s: &str| der_tlv(0x17, s.as_bytes());
+    let ctx = |n: u8, c: &[u8]| der_tlv(0xA0 | n, c);
+
+    // Name: SEQUENCE { SET { SEQUENCE { OID cn, UTF8String "Test" } } }
+    let name = seq(&[&set(&[&seq(&[&oid(oid_cn), &utf8("Test")])])]);
+
+    // AlgorithmIdentifiers
+    let alg_sha256_rsa = seq(&[&oid(oid_sha256_rsa), &null()]);
+    let alg_rsa = seq(&[&oid(oid_rsa), &null()]);
+    let alg_sha256 = seq(&[&oid(oid_sha256), &null()]);
+
+    // Fake RSA public key (structurally valid SEQUENCE { INTEGER, INTEGER })
+    let rsa_key = seq(&[&int(&[0x01; 8]), &int(&[0x01, 0x00, 0x01])]);
+    let spki = seq(&[&alg_rsa, &bits(&rsa_key)]);
+
+    // Validity (2025-01-01 to 2030-12-31)
+    let validity = seq(&[&utctime("250101000000Z"), &utctime("301231235959Z")]);
+
+    // TBSCertificate (v1 — no explicit version tag needed)
+    let tbs = seq(&[
+        &int(&[0x01]),       // serialNumber
+        &alg_sha256_rsa,     // signature algorithm
+        &name,               // issuer
+        &validity,           // validity
+        &name,               // subject (self-signed)
+        &spki,               // subjectPublicKeyInfo
+    ]);
+
+    // Certificate
+    let cert = seq(&[&tbs, &alg_sha256_rsa, &bits(&[0xAA; 16])]);
+
+    // SignerInfo (references the cert via IssuerAndSerialNumber)
+    let sid = seq(&[&name, &int(&[0x01])]);
+    let signer_info = seq(&[
+        &int(&[0x01]),       // version
+        &sid,                // sid: IssuerAndSerialNumber { issuer, serial }
+        &alg_sha256,         // digestAlgorithm
+        &alg_sha256_rsa,     // signatureAlgorithm
+        &octs(&[0xBB; 16]),  // signature (fake)
+    ]);
+
+    // SignedData
+    let signed_data = seq(&[
+        &int(&[0x01]),                          // version
+        &set(&[&alg_sha256]),                   // digestAlgorithms
+        &seq(&[&oid(oid_data)]),                // encapContentInfo (id-data, no eContent)
+        &ctx(0, &cert),                          // [0] IMPLICIT certificates (one cert)
+        &set(&[&signer_info]),                   // signerInfos
+    ]);
+
+    // ContentInfo
+    let content_info = seq(&[
+        &oid(oid_signed_data),
+        &ctx(0, &signed_data),                   // [0] EXPLICIT content
+    ]);
+
+    // Build PE with WIN_CERTIFICATE
+    let blob = &content_info;
+    let win_cert_len = 8 + blob.len();
+    let cert_offset: u32 = 0x400;
+    let mut pe = build_minimal_pe_with_cert_dd(cert_offset, win_cert_len as u32);
+    pe.resize(cert_offset as usize + win_cert_len, 0);
+    let off = cert_offset as usize;
+    pe[off..off + 4].copy_from_slice(&(win_cert_len as u32).to_le_bytes());
+    pe[off + 4..off + 6].copy_from_slice(&0x0200u16.to_le_bytes()); // WIN_CERT_REVISION_2_0
+    pe[off + 6..off + 8].copy_from_slice(&0x0002u16.to_le_bytes()); // PKCS_SIGNED_DATA
+    pe[off + 8..off + 8 + blob.len()].copy_from_slice(blob);
+    pe
+}
+
+#[test]
+fn authenticode_valid_self_signed() {
+    let data = build_pe_with_valid_authenticode();
+    let output = petriage_run_with_args(&data, &["--json", "-c"]);
+    assert_eq!(output.status.code(), Some(0), "should exit 0");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let val: serde_json::Value = serde_json::from_str(&stdout)
+        .expect("stdout should be valid JSON");
+    let auth = val.get("authenticode").expect("should have authenticode field");
+    assert_eq!(auth["signed"], true, "should be signed");
+    assert_eq!(auth["parse_ok"], true, "should parse OK for valid CMS structure");
+    assert_eq!(auth["trust_verified"], false, "trust verification not implemented");
+
+    // Should have a signer with subject "Test"
+    let signer = auth.get("signer").expect("should have signer");
+    assert!(!signer.is_null(), "signer should not be null");
+    assert_eq!(signer["subject"].as_str().unwrap(), "Test");
+    assert_eq!(signer["issuer"].as_str().unwrap(), "Test");
+    assert_eq!(signer["is_signer"], true);
+
+    // Should have certificate chain
+    let certs = auth["certificates"].as_array().expect("should have certificates array");
+    assert!(!certs.is_empty(), "should have at least one certificate");
+
+    // Should have WIN_CERTIFICATE info
+    let wc = auth.get("win_certificate").expect("should have win_certificate");
+    assert!(wc["length"].as_u64().unwrap() > 8, "win_cert length should be > 8");
+    assert_eq!(wc["revision"].as_str().unwrap(), "WIN_CERT_REVISION_2_0");
+    assert_eq!(wc["certificate_type"].as_str().unwrap(), "WIN_CERT_TYPE_PKCS_SIGNED_DATA");
+}
+
+#[test]
+fn authenticode_not_in_json_when_flag_off() {
+    // Without -c flag, authenticode should not appear in JSON
+    let data = build_minimal_pe_with_cert_dd(0, 0);
+    let output = petriage_run_with_args(&data, &["--json", "-H"]); // headers only
+    if output.status.code() == Some(0) {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let val: serde_json::Value = serde_json::from_str(&stdout)
+            .expect("stdout should be valid JSON");
+        assert!(val.get("authenticode").is_none(),
+            "authenticode should not appear when flag is off");
+    }
+}

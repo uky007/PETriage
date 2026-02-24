@@ -18,6 +18,7 @@ pub struct AnalysisOptions {
     pub show_hashes: bool,
     pub show_overlay: bool,
     pub show_resources: bool,
+    pub show_authenticode: bool,
     pub min_str_len: usize,
     pub file_name: String,
 }
@@ -46,6 +47,8 @@ pub struct AnalysisResult {
     pub overlay: Option<OverlayInfo>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub resources: Option<ResourceInfo>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub authenticode: Option<AuthenticodeInfo>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub suspicious_summary: Option<SuspiciousSummary>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -255,6 +258,39 @@ pub struct VersionString {
     pub value: String,
 }
 
+#[derive(Clone, Debug, Serialize)]
+pub struct AuthenticodeInfo {
+    pub signed: bool,
+    pub parse_ok: bool,
+    pub trust_verified: bool,
+    pub warnings: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub win_certificate: Option<WinCertificateInfo>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signer: Option<CertificateEntry>,
+    pub certificates: Vec<CertificateEntry>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct WinCertificateInfo {
+    pub length: u32,
+    pub revision: String,
+    pub revision_raw: u16,
+    pub certificate_type: String,
+    pub certificate_type_raw: u16,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct CertificateEntry {
+    pub subject: String,
+    pub issuer: String,
+    pub serial: String,
+    pub not_before: String,
+    pub not_after: String,
+    pub thumbprint_sha1: String,
+    pub is_signer: bool,
+}
+
 pub fn analyze(data: &[u8], pe: &PE, opts: &AnalysisOptions) -> AnalysisResult {
     let pe_type = if pe.is_64 { "PE32+ (64-bit)" } else { "PE32 (32-bit)" }.to_string();
 
@@ -324,6 +360,12 @@ pub fn analyze(data: &[u8], pe: &PE, opts: &AnalysisOptions) -> AnalysisResult {
         None
     };
 
+    let authenticode = if opts.show_authenticode {
+        Some(parse_authenticode(data, pe))
+    } else {
+        None
+    };
+
     let suspicious_summary = imports.as_ref().map(|imp| build_suspicious_summary(imp));
 
     let anomalies = Some(detect_anomalies(
@@ -342,6 +384,7 @@ pub fn analyze(data: &[u8], pe: &PE, opts: &AnalysisOptions) -> AnalysisResult {
         hashes,
         overlay,
         resources,
+        authenticode,
         suspicious_summary,
         anomalies,
     }
@@ -1511,15 +1554,10 @@ fn file_type_str(file_type: u32) -> String {
 fn parse_resources(data: &[u8], pe: &PE) -> Option<ResourceInfo> {
     // Get Data Directory index 2 (Resource Table)
     let opt = pe.header.optional_header.as_ref()?;
-    let mut rsrc_rva = 0u32;
-    let mut rsrc_size = 0u32;
-    for (idx, (_, dd)) in opt.data_directories.dirs().enumerate() {
-        if idx == 2 {
-            rsrc_rva = dd.virtual_address;
-            rsrc_size = dd.size;
-            break;
-        }
-    }
+    let (rsrc_rva, rsrc_size) = match opt.data_directories.data_directories.get(2) {
+        Some(Some((_, dd))) => (dd.virtual_address, dd.size),
+        _ => (0, 0),
+    };
     if rsrc_rva == 0 || rsrc_size == 0 {
         return None;
     }
@@ -1966,4 +2004,383 @@ fn reconstruct_ico(
         ico_bytes: ico,
         images: icon_images,
     })
+}
+
+// --- Authenticode / Code Signing ---
+
+fn parse_authenticode(data: &[u8], pe: &PE) -> AuthenticodeInfo {
+    let not_signed = AuthenticodeInfo {
+        signed: false,
+        parse_ok: false,
+        trust_verified: false,
+        warnings: Vec::new(),
+        win_certificate: None,
+        signer: None,
+        certificates: Vec::new(),
+    };
+
+    // Get Data Directory index 4 (Certificate Table)
+    // Certificate Table is special: the "RVA" field is actually a file offset, not an RVA.
+    let opt = match pe.header.optional_header.as_ref() {
+        Some(o) => o,
+        None => return not_signed,
+    };
+
+    let (cert_offset, cert_size) = match opt.data_directories.data_directories.get(4) {
+        Some(Some((_, dd))) => (dd.virtual_address, dd.size),
+        _ => (0, 0),
+    };
+
+    if cert_offset == 0 && cert_size == 0 {
+        return not_signed;
+    }
+
+    let mut warnings = Vec::new();
+
+    // Boundary check
+    let offset = cert_offset as usize;
+    let size = cert_size as usize;
+    if offset.checked_add(size).is_none() || offset + size > data.len() || size < 8 {
+        warnings.push("Certificate Table points outside file bounds".into());
+        return AuthenticodeInfo {
+            signed: true,
+            parse_ok: false,
+            trust_verified: false,
+            warnings,
+            win_certificate: None,
+            signer: None,
+            certificates: Vec::new(),
+        };
+    }
+
+    // WIN_CERTIFICATE header: dwLength(4) + wRevision(2) + wCertificateType(2)
+    let dw_length = read_u32_le(data, offset);
+    let w_revision = read_u16_le(data, offset + 4);
+    let w_certificate_type = read_u16_le(data, offset + 6);
+
+    let revision_str = match w_revision {
+        0x0100 => "WIN_CERT_REVISION_1_0".into(),
+        0x0200 => "WIN_CERT_REVISION_2_0".into(),
+        _ => format!("Unknown ({:#06x})", w_revision),
+    };
+
+    let cert_type_str = match w_certificate_type {
+        0x0001 => "WIN_CERT_TYPE_X509".into(),
+        0x0002 => "WIN_CERT_TYPE_PKCS_SIGNED_DATA".into(),
+        0x0003 => "WIN_CERT_TYPE_RESERVED_1".into(),
+        0x0004 => "WIN_CERT_TYPE_TS_STACK_SIGNED".into(),
+        _ => format!("Unknown ({:#06x})", w_certificate_type),
+    };
+
+    let win_cert = WinCertificateInfo {
+        length: dw_length,
+        revision: revision_str,
+        revision_raw: w_revision,
+        certificate_type: cert_type_str,
+        certificate_type_raw: w_certificate_type,
+    };
+
+    if w_certificate_type != 0x0002 {
+        warnings.push(format!(
+            "Certificate type is {:#06x}, expected PKCS_SIGNED_DATA (0x0002)",
+            w_certificate_type
+        ));
+        return AuthenticodeInfo {
+            signed: true,
+            parse_ok: false,
+            trust_verified: false,
+            warnings,
+            win_certificate: Some(win_cert),
+            signer: None,
+            certificates: Vec::new(),
+        };
+    }
+
+    // bCertificate starts at offset+8, length = dwLength-8
+    // dwLength must not exceed the Certificate Table directory size
+    if dw_length as usize > size {
+        warnings.push(format!(
+            "WIN_CERTIFICATE dwLength ({}) exceeds Certificate Table size ({})",
+            dw_length, size
+        ));
+        return AuthenticodeInfo {
+            signed: true,
+            parse_ok: false,
+            trust_verified: false,
+            warnings,
+            win_certificate: Some(win_cert),
+            signer: None,
+            certificates: Vec::new(),
+        };
+    }
+    let blob_len = dw_length.saturating_sub(8) as usize;
+    let blob_start = offset + 8;
+    if blob_start + blob_len > data.len() || blob_len == 0 {
+        warnings.push("PKCS#7 blob extends beyond file".into());
+        return AuthenticodeInfo {
+            signed: true,
+            parse_ok: false,
+            trust_verified: false,
+            warnings,
+            win_certificate: Some(win_cert),
+            signer: None,
+            certificates: Vec::new(),
+        };
+    }
+
+    let pkcs7_blob = &data[blob_start..blob_start + blob_len];
+
+    // Parse PKCS#7 ContentInfo
+    use cms::content_info::ContentInfo;
+    use cms::signed_data::SignedData;
+    use der::Decode;
+
+    let content_info = match ContentInfo::from_der(pkcs7_blob) {
+        Ok(ci) => ci,
+        Err(_) => {
+            warnings.push("Failed to parse PKCS#7 ContentInfo (DER)".into());
+            return AuthenticodeInfo {
+                signed: true,
+                parse_ok: false,
+                trust_verified: false,
+                warnings,
+                win_certificate: Some(win_cert),
+                signer: None,
+                certificates: Vec::new(),
+            };
+        }
+    };
+
+    // Verify content_type is signedData (1.2.840.113549.1.7.2)
+    let signed_data_oid = const_oid::ObjectIdentifier::new_unwrap("1.2.840.113549.1.7.2");
+    if content_info.content_type != signed_data_oid {
+        warnings.push(format!(
+            "ContentInfo content_type is {}, expected signedData (1.2.840.113549.1.7.2)",
+            content_info.content_type
+        ));
+        return AuthenticodeInfo {
+            signed: true,
+            parse_ok: false,
+            trust_verified: false,
+            warnings,
+            win_certificate: Some(win_cert),
+            signer: None,
+            certificates: Vec::new(),
+        };
+    }
+
+    let signed_data = match content_info.content.decode_as::<SignedData>() {
+        Ok(sd) => sd,
+        Err(_) => {
+            warnings.push("Failed to decode SignedData from ContentInfo".into());
+            return AuthenticodeInfo {
+                signed: true,
+                parse_ok: false,
+                trust_verified: false,
+                warnings,
+                win_certificate: Some(win_cert),
+                signer: None,
+                certificates: Vec::new(),
+            };
+        }
+    };
+
+    // Extract raw X.509 certificates and converted entries
+    let mut raw_certs: Vec<&x509_cert::Certificate> = Vec::new();
+    let mut certificates = Vec::new();
+    if let Some(cert_set) = &signed_data.certificates {
+        for cert_choice in cert_set.0.iter() {
+            use cms::cert::CertificateChoices;
+            if let CertificateChoices::Certificate(cert) = cert_choice {
+                raw_certs.push(cert);
+                certificates.push(extract_cert_entry(cert));
+            }
+        }
+    }
+
+    // Identify signer from SignerInfos[0].sid (IssuerAndSerialNumber)
+    // Compare using full issuer DN (DER bytes) + serial, not just CN string
+    let mut signer_idx: Option<usize> = None;
+    if let Some(signer_info) = signed_data.signer_infos.0.iter().next() {
+        use cms::signed_data::SignerIdentifier;
+        use der::Encode;
+        if let SignerIdentifier::IssuerAndSerialNumber(ias) = &signer_info.sid {
+            let signer_issuer_der = ias.issuer.to_der().ok();
+            let signer_serial_bytes = ias.serial_number.as_bytes();
+            for (i, raw_cert) in raw_certs.iter().enumerate() {
+                let tbs = &raw_cert.tbs_certificate;
+                let issuer_match = match (&signer_issuer_der, tbs.issuer.to_der().ok()) {
+                    (Some(a), Some(b)) => a == &b,
+                    _ => false,
+                };
+                if issuer_match && tbs.serial_number.as_bytes() == signer_serial_bytes {
+                    signer_idx = Some(i);
+                    break;
+                }
+            }
+            if signer_idx.is_none() {
+                warnings.push("Signer certificate not found in certificate chain".into());
+            }
+        }
+    }
+
+    // Mark signer cert
+    if let Some(idx) = signer_idx {
+        certificates[idx].is_signer = true;
+    }
+
+    let signer = signer_idx.map(|i| certificates[i].clone());
+
+    // Generate warnings
+    // Check for expired certificates
+    let now_str = format_current_utc();
+    for cert in &certificates {
+        if cert.not_after < now_str {
+            warnings.push(format!("Certificate expired: {} (expired {})", cert.subject, cert.not_after));
+        }
+    }
+    // Check for self-signed (subject == issuer)
+    for cert in &certificates {
+        if cert.subject == cert.issuer {
+            warnings.push(format!("Self-signed certificate: {}", cert.subject));
+        }
+    }
+    // Check chain completeness
+    if certificates.len() == 1 {
+        warnings.push("Certificate chain contains only one certificate".into());
+    }
+
+    AuthenticodeInfo {
+        signed: true,
+        parse_ok: true,
+        trust_verified: false,
+        warnings,
+        win_certificate: Some(win_cert),
+        signer,
+        certificates,
+    }
+}
+
+fn extract_cert_entry(cert: &x509_cert::Certificate) -> CertificateEntry {
+    let tbs = &cert.tbs_certificate;
+    let subject = extract_common_name(&tbs.subject);
+    let issuer = extract_common_name(&tbs.issuer);
+    let serial = hex_encode(tbs.serial_number.as_bytes());
+    let not_before = format_x509_time(&tbs.validity.not_before);
+    let not_after = format_x509_time(&tbs.validity.not_after);
+
+    // Compute SHA-1 thumbprint of the entire DER-encoded certificate
+    let thumbprint_sha1 = {
+        use der::Encode;
+        match cert.to_der() {
+            Ok(der_bytes) => {
+                let mut hasher = Sha1::new();
+                Digest::update(&mut hasher, &der_bytes);
+                let hash = hasher.finalize();
+                hash.iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(":")
+            }
+            Err(_) => "N/A".into(),
+        }
+    };
+
+    CertificateEntry {
+        subject,
+        issuer,
+        serial,
+        not_before,
+        not_after,
+        thumbprint_sha1,
+        is_signer: false,
+    }
+}
+
+fn extract_common_name(name: &x509_cert::name::Name) -> String {
+    // OID 2.5.4.3 = CN (Common Name)
+    let cn_oid = const_oid::ObjectIdentifier::new_unwrap("2.5.4.3");
+    for rdn in name.0.iter() {
+        for atav in rdn.0.iter() {
+            if atav.oid == cn_oid {
+                // Try to extract the string value from the ANY
+                if let Ok(s) = atav.value.decode_as::<der::asn1::Utf8StringRef<'_>>() {
+                    return s.as_str().to_string();
+                }
+                if let Ok(s) = atav.value.decode_as::<der::asn1::PrintableStringRef<'_>>() {
+                    return s.as_str().to_string();
+                }
+                if let Ok(s) = atav.value.decode_as::<der::asn1::Ia5StringRef<'_>>() {
+                    return s.as_str().to_string();
+                }
+                // BMPString (UTF-16BE) — decode manually
+                if let Ok(bytes) = atav.value.decode_as::<der::asn1::OctetStringRef<'_>>() {
+                    let b = bytes.as_bytes();
+                    if b.len() >= 2 && b.len() % 2 == 0 {
+                        let chars: Vec<u16> = b.chunks(2).map(|c| u16::from_be_bytes([c[0], c[1]])).collect();
+                        return String::from_utf16_lossy(&chars);
+                    }
+                }
+            }
+        }
+    }
+    // Fallback: serialize the whole name
+    format!("{}", name)
+}
+
+fn format_x509_time(time: &x509_cert::time::Time) -> String {
+    use x509_cert::time::Time;
+    let dt = match time {
+        Time::UtcTime(ut) => ut.to_date_time(),
+        Time::GeneralTime(gt) => gt.to_date_time(),
+    };
+    format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}:{:02} UTC",
+        dt.year(), dt.month(), dt.day(),
+        dt.hour(), dt.minutes(), dt.seconds()
+    )
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(":")
+}
+
+fn format_current_utc() -> String {
+    // Approximate current UTC time from SystemTime for certificate expiry comparison
+    let secs = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    if secs == 0 {
+        return String::new();
+    }
+    // Reuse existing format_timestamp logic for the date portion
+    let days = secs / 86400;
+    let time_of_day = secs % 86400;
+    let hours = time_of_day / 3600;
+    let minutes = (time_of_day % 3600) / 60;
+    let seconds_val = time_of_day % 60;
+
+    let mut y = 1970i64;
+    let mut remaining_days = days;
+    loop {
+        let days_in_year = if is_leap_year(y) { 366 } else { 365 };
+        if remaining_days < days_in_year {
+            break;
+        }
+        remaining_days -= days_in_year;
+        y += 1;
+    }
+    let days_in_months: [i64; 12] = if is_leap_year(y) {
+        [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    } else {
+        [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    };
+    let mut m = 0;
+    for (i, &dm) in days_in_months.iter().enumerate() {
+        if remaining_days < dm {
+            m = i + 1;
+            break;
+        }
+        remaining_days -= dm;
+    }
+    let d = remaining_days + 1;
+    format!("{:04}-{:02}-{:02} {:02}:{:02}:{:02} UTC", y, m, d, hours, minutes, seconds_val)
 }

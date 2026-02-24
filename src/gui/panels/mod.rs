@@ -6,3 +6,4 @@ pub mod exports;
 pub mod strings;
 pub mod overlay;
 pub mod resources;
+pub mod authenticode;

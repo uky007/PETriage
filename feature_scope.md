@@ -32,19 +32,18 @@ These features differentiate a good tool from a basic one. PEStudio, PE-bear, an
 18. **Anomaly Detection**: 18 heuristic rules with `rule_id`/`evidence`/`threshold` for JSON traceability. Covers packing (entropy, W^X, expansion ratio), security features (ASLR/DEP/CFG/SEH), timestamp anomalies, structural issues, suspicious API combos. All arithmetic uses checked/float operations to prevent overflow panics on crafted PEs — **implemented**
 19. **Load Config Directory**: SEH handler table, CFG function table, guard flags — **not yet implemented**
 20. **TUI Hex Viewer**: interactive terminal hex viewer with PE region navigation, alternate screen mode (`--features tui`, `-x`/`--view` flag) — **implemented**
+21. **Authenticode**: digital signature presence detection, PKCS#7/CMS parsing, X.509 certificate chain extraction (subject, issuer, serial, validity, SHA-1 thumbprint), signer identification, expiry/self-signed/chain warnings (`-c`/`--authenticode`, GUI "Signing" tab) — **implemented**
 
 ## v0.3 — Advanced
 
 These features make petriage a comprehensive professional-grade tool.
 
-21. **.NET Metadata**: CLR header, metadata tables, streams, managed entry point
-22. **Authenticode**: digital signature parsing and certificate chain extraction (not full verification — that requires Windows CryptoAPI)
+22. **.NET Metadata**: CLR header, metadata tables, streams, managed entry point
 23. **Bound/Delay Imports**: parsing and display
 24. **Relocation Table**: parsing (base relocation entries)
 25. **Entropy Histogram**: per-section and overall entropy with visual bar chart in terminal
 26. **Packer Detection**: signature-based packer/compiler identification (PEiD-compatible signatures)
 27. **Exception Directory**: exception handler table (x64)
-28. **Certificate Table**: raw certificate data extraction
 
 ## Technical Approach
 
@@ -59,6 +58,10 @@ These features make petriage a comprehensive professional-grade tool.
 | **image** | ICO/PNG/BMP decoding for icon display (GUI only) | Standard Rust image library; optional dependency gated behind `gui` feature |
 | **ratatui** | TUI hex viewer (optional, `tui` feature) | Terminal UI framework; alternate screen mode for interactive PE browsing |
 | **crossterm** | Terminal I/O for TUI (optional, `tui` feature) | Cross-platform terminal manipulation |
+| **cms** | PKCS#7/CMS SignedData parsing for Authenticode | Standard RustCrypto crate for CMS/PKCS#7 |
+| **x509-cert** | X.509 certificate parsing | Standard RustCrypto crate for X.509 |
+| **der** | ASN.1 DER encoding/decoding | Required by cms and x509-cert |
+| **const-oid** | OID constants (e.g., CN = 2.5.4.3) | Required for X.509 attribute extraction |
 | Manual parsing | Rich header, TLS, debug, resources, overlay | goblin doesn't expose these; straightforward to parse from raw bytes |
 
 **Why goblin over pelite?** goblin is more actively maintained (recent releases, larger community), handles both PE32 and PE32+ uniformly, and is heavily fuzz-tested. pelite has deeper PE coverage but slower release cadence. We supplement goblin's gaps with targeted manual parsing rather than pulling in a second full PE library.
@@ -76,6 +79,7 @@ Options:
   -s, --sections         Show sections
   -S, --strings          Show strings
   -r, --resources        Show resources
+  -c, --authenticode     Show Authenticode/code signing info
   --hashes               Show file hashes
   --overlay              Show overlay information
   --json                 Output as JSON
@@ -96,11 +100,12 @@ src/
                     #   headers, sections, imports, exports, strings,
                     #   hashes, entropy, overlay, resources (tree/version/manifest/icons),
                     #   suspicious API indicators (~130 APIs, 12 categories),
-                    #   anomaly detection (18 rules with rule_id/evidence/threshold)
+                    #   anomaly detection (18 rules with rule_id/evidence/threshold),
+                    #   authenticode (PKCS#7/CMS + X.509 certificate chain)
   output.rs         # Human-readable and JSON formatting
   gui/mod.rs        # egui GUI entry point (optional, --features gui)
   gui/app_state.rs  # GUI application state
-  gui/panels/       # GUI tab panels (file_info, headers, sections, imports, etc.)
+  gui/panels/       # GUI tab panels (file_info, headers, sections, imports, ..., authenticode)
   tui.rs            # ratatui TUI hex viewer (optional, --features tui)
 ```
 

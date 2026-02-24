@@ -246,6 +246,52 @@ pub fn format_text(result: &AnalysisResult) -> String {
         out.push('\n');
     }
 
+    if let Some(ref auth) = result.authenticode {
+        out.push_str("=== Authenticode / Code Signing ===\n");
+        out.push_str(&format!("  Signed:          {}\n", if auth.signed { "Yes" } else { "No" }));
+        out.push_str(&format!("  Parse OK:        {}\n", if auth.parse_ok { "Yes" } else { "No" }));
+        out.push_str(&format!("  Trust Verified:  {}\n", if auth.trust_verified { "Yes" } else { "No (not implemented)" }));
+
+        if let Some(ref wc) = auth.win_certificate {
+            out.push_str(&format!("\n  WIN_CERTIFICATE:\n"));
+            out.push_str(&format!("    Length:   {} bytes\n", wc.length));
+            out.push_str(&format!("    Revision: {} ({:#06x})\n", wc.revision, wc.revision_raw));
+            out.push_str(&format!("    Type:     {} ({:#06x})\n", wc.certificate_type, wc.certificate_type_raw));
+        }
+
+        if let Some(ref signer) = auth.signer {
+            out.push_str(&format!("\n  Signer:\n"));
+            out.push_str(&format!("    Subject:    {}\n", signer.subject));
+            out.push_str(&format!("    Issuer:     {}\n", signer.issuer));
+            out.push_str(&format!("    Serial:     {}\n", signer.serial));
+            out.push_str(&format!("    Not Before: {}\n", signer.not_before));
+            out.push_str(&format!("    Not After:  {}\n", signer.not_after));
+            out.push_str(&format!("    Thumbprint: {}\n", signer.thumbprint_sha1));
+        }
+
+        if !auth.certificates.is_empty() {
+            out.push_str(&format!("\n  Certificate Chain ({} certificates):\n", auth.certificates.len()));
+            for (i, cert) in auth.certificates.iter().enumerate() {
+                let signer_tag = if cert.is_signer { " (signer)" } else { "" };
+                out.push_str(&format!("    [{}]{}\n", i, signer_tag));
+                out.push_str(&format!("      Subject:    {}\n", cert.subject));
+                out.push_str(&format!("      Issuer:     {}\n", cert.issuer));
+                out.push_str(&format!("      Serial:     {}\n", cert.serial));
+                out.push_str(&format!("      Not Before: {}\n", cert.not_before));
+                out.push_str(&format!("      Not After:  {}\n", cert.not_after));
+                out.push_str(&format!("      Thumbprint: {}\n", cert.thumbprint_sha1));
+            }
+        }
+
+        if !auth.warnings.is_empty() {
+            out.push_str(&format!("\n  Warnings:\n"));
+            for w in &auth.warnings {
+                out.push_str(&format!("    ! {}\n", w));
+            }
+        }
+        out.push('\n');
+    }
+
     if let Some(ref strings) = result.strings {
         out.push_str(&format!("=== Strings ({}) ===\n", strings.len()));
         for s in strings {

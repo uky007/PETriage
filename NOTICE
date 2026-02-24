@@ -16,6 +16,10 @@ The following is a list of direct dependencies and their licenses:
   sha1 0.10          MIT OR Apache-2.0  https://github.com/RustCrypto/hashes
   sha2 0.10          MIT OR Apache-2.0  https://github.com/RustCrypto/hashes
   colored 3.1        MPL-2.0       https://github.com/mackwic/colored
+  cms 0.2             MIT OR Apache-2.0  https://github.com/RustCrypto/formats
+  x509-cert 0.2       MIT OR Apache-2.0  https://github.com/RustCrypto/formats
+  der 0.7             MIT OR Apache-2.0  https://github.com/RustCrypto/formats
+  const-oid 0.9       MIT OR Apache-2.0  https://github.com/RustCrypto/formats
 
 Optional dependencies (enabled via feature flags):
 
