@@ -41,6 +41,20 @@ pub fn format_text(result: &AnalysisResult) -> String {
         out.push('\n');
     }
 
+    // OPSEC: PDB Path warning (prominent, before hashes)
+    if let Some(ref debug) = result.debug {
+        let pdb_paths: Vec<&str> = debug.entries.iter()
+            .filter_map(|e| e.pdb_path.as_deref())
+            .collect();
+        if !pdb_paths.is_empty() {
+            out.push_str(&format!("{}\n", "=== OPSEC: PDB Path ===".yellow().bold()));
+            for pdb in &pdb_paths {
+                out.push_str(&format!("  {}\n", pdb.yellow()));
+            }
+            out.push('\n');
+        }
+    }
+
     if let Some(ref hashes) = result.hashes {
         out.push_str(&format!("=== Hashes ===\n"));
         out.push_str(&format!("  MD5:     {}\n", hashes.md5));
@@ -256,7 +270,7 @@ pub fn format_text(result: &AnalysisResult) -> String {
                 out.push_str(&format!("      Age:             {}\n", age));
             }
             if let Some(ref pdb) = entry.pdb_path {
-                out.push_str(&format!("      PDB:             {}\n", pdb));
+                out.push_str(&format!("      PDB:             {}\n", pdb.yellow().bold()));
             }
         }
         out.push('\n');

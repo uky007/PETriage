@@ -32,17 +32,17 @@ Malware analysts frequently examine Windows PE files, but the most capable surfa
 | Hashes | MD5, SHA1, SHA256 of the entire file, imphash (Mandiant-compatible import hash) |
 | Overlay | Detection of data appended beyond the PE structure |
 | Suspicious API Indicators | Auto-tags ~130 Windows APIs across 12 risk categories (Process Injection, Code Execution, Network, Evasion, etc.) with severity levels (high/medium/low) |
-| Anomaly Detection | 18 heuristic rules detecting packing indicators, W^X violations, missing security features (ASLR/DEP/CFG), timestamp anomalies, structural irregularities, and suspicious API combos |
+| Anomaly Detection | 19 heuristic rules detecting packing indicators, W^X violations, missing security features (ASLR/DEP/CFG), timestamp anomalies, structural irregularities, suspicious API combos, and OPSEC indicators (PDB path leakage) |
 | Resource Directory | Resource tree enumeration, VS_VERSIONINFO parsing (FileVersion, CompanyName, OriginalFilename, etc.), manifest extraction (UAC requestedExecutionLevel), embedded icon extraction and display (GUI) |
 | Rich Header | XOR key extraction, compiler/linker tool entries (prod_id, build_id, count). Enables compiler identification and build environment fingerprinting |
 | TLS Directory | TLS callback detection with VA listing. Critical for malware — TLS callbacks execute before main() and are commonly used for anti-debug/unpacking |
-| Debug Directory | Debug entry enumeration, CodeView (RSDS) parsing with PDB path, GUID, and age extraction |
+| Debug Directory | Debug entry enumeration, CodeView (RSDS) parsing with PDB path, GUID, and age extraction. PDB paths are always parsed and surfaced as OPSEC indicators (highlighted in CLI and GUI) |
 | Authenticode | Digital signature presence detection, PKCS#7/CMS parsing, X.509 certificate chain extraction (subject, issuer, serial, validity, SHA-1 thumbprint), signer identification, expiry/self-signed/chain warnings. Cross-platform — no Windows CryptoAPI required. Trust verification is not performed. |
 | Output | Human-readable tables (default), JSON (`--json`), NDJSON (`--ndjson`), file output (`-o`) |
 | Batch Mode | Analyze all PE files in a directory (`--batch <dir>`) |
 | Fail-on | Exit with code 3 if anomalies meet a severity threshold (`--fail-on <severity>`) |
 | TUI Hex Viewer | Interactive terminal hex viewer with region navigation — select PE structures (DOS Header, COFF, sections, overlay) and browse hex dumps with keyboard scrolling (opt-in via `--features tui`) |
-| GUI | egui-based GUI with tabbed views, drag & drop, filters, entropy color-coding, suspicious API highlighting, embedded icon display (opt-in via `--features gui`) |
+| GUI | egui-based GUI with tabbed views, drag & drop, filters, entropy color-coding, suspicious API highlighting, embedded icon display, PE header editor with Save As (opt-in via `--features gui`) |
 
 ## Installation
 
@@ -132,13 +132,13 @@ The TUI provides:
 ### GUI (requires `--features gui` build)
 
 ```
-petriage --gui                   # Open with file dialog
-petriage --gui <file.exe>        # Open file directly in GUI
+petriage-gui                     # Open with file dialog
+petriage-gui <file.exe>          # Open file directly in GUI
 ```
 
 The GUI provides:
 
-- **Tabbed interface** — File Info, Headers, Sections, Imports, Exports, Strings, Overlay, Resources, Rich, TLS, Debug, Signing
+- **Tabbed interface** — File Info, Headers, Sections, Imports, Exports, Strings, Overlay, Resources, Rich, TLS, Debug, Signing, Editor
 - **Drag & drop** — Drop PE files onto the window to analyze
 - **Left sidebar** — Toggle analysis options and re-analyze without restarting
 - **Import filter** — Search API names across DLLs, "Suspicious only" toggle to surface risky APIs
@@ -146,6 +146,8 @@ The GUI provides:
 - **Entropy color-coding** — Section entropy highlighted green (<6) / yellow (6–7) / red (7–8)
 - **Suspicious API indicators** — Color-coded severity badges (red/yellow/cyan) on File Info and Imports tabs
 - **Embedded icon display** — Extracts and renders PE embedded icons (RT_GROUP_ICON / RT_ICON); primary icon shown on File Info tab, all icon groups on Resources tab. Useful for identifying malware impersonating legitimate software
+- **OPSEC indicators** — PDB path highlighted in orange on Debug tab and File Info tab with dedicated badge, surfacing developer environment leaks
+- **PE Header Editor** — Edit COFF header (TimeDateStamp, Characteristics), Optional header (AddressOfEntryPoint, ImageBase, DllCharacteristics flags, CheckSum, Subsystem, etc.), and Section headers (Name, VirtualSize, RawSize, Characteristics flags) with hex DragValue inputs and flag checkboxes. Modified fields highlighted. Save As writes patched PE to disk.
 - **Hash copy buttons** — One-click copy of MD5/SHA1/SHA256
 - **Virtual scroll** — Handles tens of thousands of strings without lag
 
@@ -156,6 +158,9 @@ The GUI provides:
   File:    sample.exe
   Size:    72704 bytes (71.00 KB)
   Type:    PE32 (32-bit)
+
+=== OPSEC: PDB Path ===
+  C:\Users\dev\source\repos\malware\x64\Release\payload.pdb
 
 === Hashes ===
   MD5:     a1b2c3d4e5f6...
@@ -201,7 +206,7 @@ The GUI provides:
   ...
 
 === Anomaly Detection ===
-  CRITICAL: 2 WARNING: 5 INFO: 3
+  CRITICAL: 2 WARNING: 5 INFO: 4
 
   [CRITICAL] Code Integrity: Section '.xpack' is both writable and executable (W^X violation)
   [CRITICAL] Suspicious Combo: Process Injection + Evasion APIs both present — possible code injection technique
@@ -210,6 +215,7 @@ The GUI provides:
   [WARNING] Security: DEP (NX_COMPAT) is disabled
   [WARNING] Timestamp: Timestamp (1998-03-15 00:00:00 UTC) is before year 2000 — possible forgery
   [WARNING] Structure: Overlay data detected (4096 bytes at offset 0x12000)
+  [INFO] [OPSEC-001] OPSEC: PDB debug path found: C:\Users\dev\source\repos\malware\x64\Release\payload.pdb
   [INFO] Security: Control Flow Guard (GUARD_CF) is not enabled
   [INFO] Structure: Non-standard section name '.xpack'
   ...
@@ -295,6 +301,7 @@ When `--json` or `--ndjson` is used, errors are output to stderr as JSON: `{"err
 - **Malformed PEs**: Arithmetic operations on PE header fields use checked arithmetic to avoid panics on crafted inputs. goblin may silently accept structurally invalid files without error. Fuzz testing with adversarial PEs is ongoing.
 - **Authenticode trust verification**: Signature parsing and certificate extraction are supported, but trust verification (chain validation against a root store) is not performed. `trust_verified` is always `false`.
 - **Authenticode dual-signing**: Only the first WIN_CERTIFICATE entry and first SignerInfo are processed. Dual-signed PEs (e.g., SHA-1 + SHA-256) will only show one signature.
+- **PE Header Editor**: The Editor tab validates optional header size before displaying fields. Malformed PEs with truncated optional headers will show an error message instead of editable fields. Out-of-bounds edits are silently skipped during save.
 - **Load Config directory**: Not yet implemented.
 - **RVA-to-offset conversion**: Validated with overflow checks and file boundary verification; however, PEs with unusual section layouts may produce incorrect mappings.
 

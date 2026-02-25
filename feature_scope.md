@@ -30,23 +30,24 @@ These features differentiate a good tool from a basic one. PEStudio, PE-bear, an
 13. **Resource Directory**: resource tree parsing (types, names, languages, sizes), VS_VERSIONINFO parsing, manifest extraction, embedded icon extraction (RT_GROUP_ICON / RT_ICON → ICO reconstruction) and GUI display — **implemented**
 14. **Rich Header**: parsing, XOR key extraction, compiler/linker tool entries (comp.id, product.id, count) — **implemented**
 15. **TLS Directory**: TLS callback detection (critical for malware — callbacks run before main), PE32/PE32+ support, callback VA listing — **implemented**
-16. **Debug Directory**: PDB path, debug type (CodeView, COFF, etc.), GUID, age — **implemented**
+16. **Debug Directory**: PDB path, debug type (CodeView, COFF, etc.), GUID, age. PDB paths are always parsed (not gated by `--all`) and surfaced as OPSEC indicators in CLI (yellow highlight + dedicated section) and GUI (orange badge on Debug/File Info tabs) — **implemented**
 17. **Suspicious API Indicators**: ~130 APIs across 12 categories with 3-level severity (high/medium/low), CLI color-coding, GUI filtering — **implemented**
-18. **Anomaly Detection**: 18 heuristic rules with `rule_id`/`evidence`/`threshold` for JSON traceability. Covers packing (entropy, W^X, expansion ratio), security features (ASLR/DEP/CFG/SEH), timestamp anomalies, structural issues, suspicious API combos. All arithmetic uses checked/float operations to prevent overflow panics on crafted PEs — **implemented**
-19. **Load Config Directory**: SEH handler table, CFG function table, guard flags — **not yet implemented**
-20. **TUI Hex Viewer**: interactive terminal hex viewer with PE region navigation, alternate screen mode (`--features tui`, `-x`/`--view` flag) — **implemented**
-21. **Authenticode**: digital signature presence detection, PKCS#7/CMS parsing, X.509 certificate chain extraction (subject, issuer, serial, validity, SHA-1 thumbprint), signer identification, expiry/self-signed/chain warnings (`-c`/`--authenticode`, GUI "Signing" tab) — **implemented**
+18. **Anomaly Detection**: 19 heuristic rules with `rule_id`/`evidence`/`threshold` for JSON traceability. Covers packing (entropy, W^X, expansion ratio), security features (ASLR/DEP/CFG/SEH), timestamp anomalies, structural issues, suspicious API combos, and OPSEC indicators (OPSEC-001: PDB path leakage). All arithmetic uses checked/float operations to prevent overflow panics on crafted PEs — **implemented**
+19. **PE Header Editor (GUI)**: CFF Explorer-style header editing in the Editor tab. Editable fields: COFF header (TimeDateStamp, Characteristics with flag checkboxes), Optional header (AddressOfEntryPoint, ImageBase PE32/PE32+, SectionAlignment, FileAlignment, SizeOfImage, SizeOfHeaders, CheckSum, Subsystem, DllCharacteristics with 7 individual flag checkboxes), Section headers (Name, VirtualSize, VirtualAddress, SizeOfRawData, PointerToRawData, Characteristics with flag checkboxes). Modified fields highlighted, pending edits tracked, Save As writes patched PE. Boundary-checked: truncated optional headers show error instead of editable fields; OOB edits skipped on save; no-op edits are not tracked — **implemented**
+20. **Load Config Directory**: SEH handler table, CFG function table, guard flags — **not yet implemented**
+21. **TUI Hex Viewer**: interactive terminal hex viewer with PE region navigation, alternate screen mode (`--features tui`, `-x`/`--view` flag) — **implemented**
+22. **Authenticode**: digital signature presence detection, PKCS#7/CMS parsing, X.509 certificate chain extraction (subject, issuer, serial, validity, SHA-1 thumbprint), signer identification, expiry/self-signed/chain warnings (`-c`/`--authenticode`, GUI "Signing" tab) — **implemented**
 
 ## v0.3 — Advanced
 
 These features make petriage a comprehensive professional-grade tool.
 
-22. **.NET Metadata**: CLR header, metadata tables, streams, managed entry point
-23. **Bound/Delay Imports**: parsing and display
-24. **Relocation Table**: parsing (base relocation entries)
-25. **Entropy Histogram**: per-section and overall entropy with visual bar chart in terminal
-26. **Packer Detection**: signature-based packer/compiler identification (PEiD-compatible signatures)
-27. **Exception Directory**: exception handler table (x64)
+23. **.NET Metadata**: CLR header, metadata tables, streams, managed entry point
+24. **Bound/Delay Imports**: parsing and display
+25. **Relocation Table**: parsing (base relocation entries)
+26. **Entropy Histogram**: per-section and overall entropy with visual bar chart in terminal
+27. **Packer Detection**: signature-based packer/compiler identification (PEiD-compatible signatures)
+28. **Exception Directory**: exception handler table (x64)
 
 ## Technical Approach
 
@@ -89,7 +90,7 @@ Options:
   --min-str-len <N>      Minimum string length (default: 4)
   -o, --output <FILE>    Write output to file
   -x, --view             Launch TUI hex viewer (--features tui)
-  --gui                  Launch GUI mode (--features gui)
+  (GUI is a separate binary: petriage-gui)
   -h, --help             Print help
   -V, --version          Print version
 ```
@@ -108,7 +109,7 @@ src/
   output.rs         # Human-readable and JSON formatting
   gui/mod.rs        # egui GUI entry point (optional, --features gui)
   gui/app_state.rs  # GUI application state
-  gui/panels/       # GUI tab panels (file_info, headers, sections, imports, ..., authenticode)
+  gui/panels/       # GUI tab panels (file_info, headers, sections, imports, ..., authenticode, editor)
   tui.rs            # ratatui TUI hex viewer (optional, --features tui)
 ```
 

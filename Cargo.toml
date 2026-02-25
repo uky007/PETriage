@@ -5,6 +5,15 @@ edition = "2024"
 description = "Cross-platform PE file surface analysis tool for malware analysts"
 license = "Apache-2.0"
 
+[[bin]]
+name = "petriage"
+path = "src/main.rs"
+
+[[bin]]
+name = "petriage-gui"
+path = "src/bin/petriage-gui.rs"
+required-features = ["gui"]
+
 [features]
 gui = ["dep:eframe", "dep:egui", "dep:egui_extras", "dep:rfd", "dep:image"]
 tui = ["dep:ratatui", "dep:crossterm"]

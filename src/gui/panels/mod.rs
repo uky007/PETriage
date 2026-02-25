@@ -10,3 +10,4 @@ pub mod rich_header;
 pub mod tls;
 pub mod debug;
 pub mod authenticode;
+pub mod editor;

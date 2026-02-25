@@ -4,6 +4,8 @@ use crate::analysis::AnalysisResult;
 
 const ACCENT: Color32 = Color32::from_rgb(0, 210, 255);
 const LABEL: Color32 = Color32::from_rgb(120, 130, 150);
+const OPSEC_BG: Color32 = Color32::from_rgb(255, 200, 50);
+const RISK_MEDIUM: Color32 = Color32::from_rgb(255, 200, 50);
 
 pub fn show(ui: &mut Ui, result: &AnalysisResult) {
     let debug = match result.debug {
@@ -64,8 +66,14 @@ pub fn show(ui: &mut Ui, result: &AnalysisResult) {
                 }
 
                 if let Some(ref pdb) = entry.pdb_path {
-                    ui.colored_label(LABEL, "PDB Path:");
-                    ui.monospace(pdb);
+                    ui.colored_label(RISK_MEDIUM, "PDB Path (OPSEC):");
+                    egui::Frame::new()
+                        .fill(OPSEC_BG.gamma_multiply(0.2))
+                        .corner_radius(egui::CornerRadius::same(3))
+                        .inner_margin(egui::Margin::symmetric(6, 2))
+                        .show(ui, |ui| {
+                            ui.label(egui::RichText::new(pdb).color(OPSEC_BG).strong().monospace());
+                        });
                     ui.end_row();
                 }
             });

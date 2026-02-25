@@ -89,6 +89,31 @@ pub fn show(ui: &mut Ui, result: &AnalysisResult, primary_icon: Option<&TextureH
         }
     }
 
+    // OPSEC Indicator: PDB Path
+    if let Some(ref debug) = result.debug {
+        let pdb_paths: Vec<&str> = debug.entries.iter()
+            .filter_map(|e| e.pdb_path.as_deref())
+            .collect();
+        if !pdb_paths.is_empty() {
+            ui.add_space(16.0);
+            ui.colored_label(RISK_MEDIUM, egui::RichText::new("OPSEC INDICATOR").size(14.0));
+            ui.add_space(6.0);
+            egui::Frame::new()
+                .fill(RISK_MEDIUM.gamma_multiply(0.15))
+                .corner_radius(egui::CornerRadius::same(4))
+                .stroke(egui::Stroke::new(1.0, RISK_MEDIUM))
+                .inner_margin(egui::Margin::same(8))
+                .show(ui, |ui| {
+                    for pdb in &pdb_paths {
+                        ui.horizontal(|ui| {
+                            ui.colored_label(RISK_MEDIUM, egui::RichText::new("PDB Path:").strong());
+                            ui.label(egui::RichText::new(*pdb).color(Color32::WHITE).monospace());
+                        });
+                    }
+                });
+        }
+    }
+
     if let Some(ref anomalies) = result.anomalies {
         if !anomalies.is_empty() {
             ui.add_space(16.0);

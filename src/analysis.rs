@@ -428,12 +428,12 @@ pub fn analyze(data: &[u8], pe: &PE, opts: &AnalysisOptions) -> AnalysisResult {
 
     let rich_header = if opts.show_all { parse_rich_header(data) } else { None };
     let tls = if opts.show_all { parse_tls(data, pe) } else { None };
-    let debug = if opts.show_all { parse_debug(data, pe) } else { None };
+    let debug = parse_debug(data, pe);
 
     let suspicious_summary = imports.as_ref().map(|imp| build_suspicious_summary(imp));
 
     let anomalies = Some(detect_anomalies(
-        &sections, &coff_header, &optional_header, &overlay, &suspicious_summary,
+        &sections, &coff_header, &optional_header, &overlay, &suspicious_summary, &debug,
     ));
 
     AnalysisResult {
@@ -463,6 +463,7 @@ fn detect_anomalies(
     optional_header: &Option<OptionalHeader>,
     overlay: &Option<OverlayInfo>,
     suspicious_summary: &Option<SuspiciousSummary>,
+    debug: &Option<DebugInfo>,
 ) -> Vec<Anomaly> {
     let mut anomalies = Vec::new();
 
@@ -758,6 +759,22 @@ fn detect_anomalies(
                 evidence: Some("categories=[Network, Crypto]".into()),
                 threshold: None,
             });
+        }
+    }
+
+    // OPSEC-001: PDB debug path found
+    if let Some(dbg) = debug {
+        for entry in &dbg.entries {
+            if let Some(ref pdb) = entry.pdb_path {
+                anomalies.push(Anomaly {
+                    rule_id: "OPSEC-001".into(),
+                    category: "OPSEC".into(),
+                    severity: "info".into(),
+                    description: format!("PDB debug path found: {}", pdb),
+                    evidence: Some(pdb.clone()),
+                    threshold: None,
+                });
+            }
         }
     }
 

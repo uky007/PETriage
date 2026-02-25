@@ -1,7 +1,3 @@
-mod analysis;
-#[cfg(feature = "gui")]
-mod gui;
-mod output;
 #[cfg(feature = "tui")]
 mod tui;
 
@@ -10,6 +6,7 @@ use std::path::PathBuf;
 use std::process;
 
 use clap::Parser;
+use petriage::{analysis, output, parse_pe_lenient};
 
 #[derive(Parser)]
 #[command(name = "petriage", version, about = "Cross-platform PE file surface analysis tool")]
@@ -85,11 +82,6 @@ struct Cli {
     #[cfg(feature = "tui")]
     #[arg(short = 'x', long = "view")]
     view: bool,
-
-    /// Launch GUI mode
-    #[cfg(feature = "gui")]
-    #[arg(long)]
-    gui: bool,
 }
 
 fn parse_severity(s: &str) -> Result<String, String> {
@@ -129,6 +121,14 @@ fn is_pe_file(path: &std::path::Path) -> bool {
     false
 }
 
+fn emit_warning(warning: &str, json_mode: bool) {
+    if json_mode {
+        eprintln!("{}", serde_json::json!({ "warning": format!("Warning: {}", warning) }));
+    } else {
+        eprintln!("Warning: {}", warning);
+    }
+}
+
 fn analyze_file(
     path: &std::path::Path,
     show_all: bool,
@@ -136,8 +136,11 @@ fn analyze_file(
 ) -> Result<analysis::AnalysisResult, String> {
     let data = fs::read(path)
         .map_err(|e| format!("Failed to read '{}': {}", path.display(), e))?;
-    let pe = goblin::pe::PE::parse(&data)
-        .map_err(|e| format!("Failed to parse PE '{}': {}", path.display(), e))?;
+    let json_mode = cli.json || cli.ndjson;
+    let (pe, warning) = parse_pe_lenient(&data, &path.display().to_string())?;
+    if let Some(w) = warning {
+        emit_warning(&w, json_mode);
+    }
     Ok(analysis::analyze(&data, &pe, &analysis::AnalysisOptions {
         show_headers: show_all || cli.headers,
         show_sections: show_all || cli.sections,
@@ -161,12 +164,6 @@ fn analyze_file(
 //   3 — anomaly threshold exceeded (--fail-on)
 fn main() {
     let cli = Cli::parse();
-
-    #[cfg(feature = "gui")]
-    if cli.gui {
-        gui::run(cli.file);
-        return;
-    }
 
     let json_mode = cli.json || cli.ndjson;
 
@@ -280,10 +277,15 @@ fn main() {
         }
     };
 
-    let pe = match goblin::pe::PE::parse(&data) {
-        Ok(pe) => pe,
-        Err(e) => {
-            exit_error(&format!("Failed to parse PE file: {}", e), json_mode, 1);
+    let pe = match parse_pe_lenient(&data, &file.display().to_string()) {
+        Ok((pe, warning)) => {
+            if let Some(w) = warning {
+                emit_warning(&w, json_mode);
+            }
+            pe
+        }
+        Err(msg) => {
+            exit_error(&msg, json_mode, 1);
         }
     };
 

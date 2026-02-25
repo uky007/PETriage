@@ -8,6 +8,7 @@ use egui::{Color32, ColorImage, CornerRadius, FontId, Margin, Stroke, TextureHan
 
 use crate::analysis::{self, AnalysisOptions};
 use app_state::{AppState, OptionsPanel, Tab};
+use panels::editor::EditorState;
 use panels::imports::ImportsState;
 use panels::strings::StringsState;
 
@@ -155,6 +156,7 @@ struct ReadpeApp {
     imports_state: ImportsState,
     strings_state: StringsState,
     icon_cache: IconCache,
+    editor_state: EditorState,
 }
 
 impl Default for ReadpeApp {
@@ -166,6 +168,7 @@ impl Default for ReadpeApp {
             imports_state: ImportsState::default(),
             strings_state: StringsState::default(),
             icon_cache: IconCache::default(),
+            editor_state: EditorState::default(),
         }
     }
 }
@@ -175,8 +178,8 @@ impl ReadpeApp {
         let file_name = path.display().to_string();
         match std::fs::read(&path) {
             Ok(data) => {
-                match goblin::pe::PE::parse(&data) {
-                    Ok(pe) => {
+                match crate::parse_pe_lenient(&data, &file_name) {
+                    Ok((pe, _warning)) => {
                         let opts = AnalysisOptions {
                             show_headers: self.options.show_headers,
                             show_sections: self.options.show_sections,
@@ -195,6 +198,7 @@ impl ReadpeApp {
                         self.imports_state = ImportsState::default();
                         self.strings_state = StringsState::default();
                         self.icon_cache = IconCache::default();
+                        self.editor_state = EditorState::default();
                         self.state = AppState::Loaded {
                             file_name,
                             data,
@@ -202,7 +206,7 @@ impl ReadpeApp {
                         };
                     }
                     Err(e) => {
-                        self.state = AppState::Error(format!("Failed to parse PE: {e}"));
+                        self.state = AppState::Error(e);
                     }
                 }
             }
@@ -216,8 +220,8 @@ impl ReadpeApp {
         if let AppState::Loaded { ref file_name, ref data, .. } = self.state {
             let file_name = file_name.clone();
             let data = data.clone();
-            match goblin::pe::PE::parse(&data) {
-                Ok(pe) => {
+            match crate::parse_pe_lenient(&data, &file_name) {
+                Ok((pe, _warning)) => {
                     let opts = AnalysisOptions {
                         show_headers: self.options.show_headers,
                         show_sections: self.options.show_sections,
@@ -236,6 +240,7 @@ impl ReadpeApp {
                     self.imports_state = ImportsState::default();
                     self.strings_state = StringsState::default();
                     self.icon_cache = IconCache::default();
+                    self.editor_state = EditorState::default();
                     self.state = AppState::Loaded {
                         file_name,
                         data,
@@ -243,7 +248,7 @@ impl ReadpeApp {
                     };
                 }
                 Err(e) => {
-                    self.state = AppState::Error(format!("Failed to parse PE: {e}"));
+                    self.state = AppState::Error(e);
                 }
             }
         }
@@ -432,7 +437,8 @@ impl eframe::App for ReadpeApp {
                             ui.colored_label(ERROR_RED, format!("Error: {msg}"));
                         });
                     }
-                    AppState::Loaded { result, .. } => {
+                    AppState::Loaded { data, result, .. } => {
+                        let data = data.clone();
                         // Populate icon cache on first frame after load
                         if !self.icon_cache.populated {
                             self.icon_cache.populated = true;
@@ -510,6 +516,7 @@ impl eframe::App for ReadpeApp {
                                             Tab::Tls => panels::tls::show(ui, &result),
                                             Tab::Debug => panels::debug::show(ui, &result),
                                             Tab::Authenticode => panels::authenticode::show(ui, &result),
+                                            Tab::Editor => panels::editor::show(ui, &data, &mut self.editor_state),
                                         }
                                     });
                             });

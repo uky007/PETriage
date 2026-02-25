@@ -14,6 +14,7 @@ pub enum Tab {
     Tls,
     Debug,
     Authenticode,
+    Editor,
 }
 
 impl Tab {
@@ -30,6 +31,7 @@ impl Tab {
         Tab::Tls,
         Tab::Debug,
         Tab::Authenticode,
+        Tab::Editor,
     ];
 
     pub fn label(&self) -> &'static str {
@@ -46,6 +48,7 @@ impl Tab {
             Tab::Tls => "TLS",
             Tab::Debug => "Debug",
             Tab::Authenticode => "Signing",
+            Tab::Editor => "Editor",
         }
     }
 }
