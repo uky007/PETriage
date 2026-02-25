@@ -428,6 +428,9 @@ pub fn analyze(data: &[u8], pe: &PE, opts: &AnalysisOptions) -> AnalysisResult {
 
     let rich_header = if opts.show_all { parse_rich_header(data) } else { None };
     let tls = if opts.show_all { parse_tls(data, pe) } else { None };
+    // Always parse debug for anomaly detection (OPSEC-001),
+    // but only include in output when show_all so that "only" flags
+    // like --hashes don't get an unexpected OPSEC section.
     let debug = parse_debug(data, pe);
 
     let suspicious_summary = imports.as_ref().map(|imp| build_suspicious_summary(imp));
@@ -435,6 +438,8 @@ pub fn analyze(data: &[u8], pe: &PE, opts: &AnalysisOptions) -> AnalysisResult {
     let anomalies = Some(detect_anomalies(
         &sections, &coff_header, &optional_header, &overlay, &suspicious_summary, &debug,
     ));
+
+    let debug_output = if opts.show_all { debug } else { None };
 
     AnalysisResult {
         file_info,
@@ -451,7 +456,7 @@ pub fn analyze(data: &[u8], pe: &PE, opts: &AnalysisOptions) -> AnalysisResult {
         authenticode,
         rich_header,
         tls,
-        debug,
+        debug: debug_output,
         suspicious_summary,
         anomalies,
     }

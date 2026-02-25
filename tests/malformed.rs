@@ -1273,3 +1273,134 @@ fn batch_output_write_failure_exits_2() {
     assert_eq!(output.status.code(), Some(2),
         "should exit 2 on write failure, got {}", output.status.code().unwrap());
 }
+
+// ========================================================================
+// OPSEC-001: PDB path detection tests
+// ========================================================================
+
+/// Build a minimal PE32 with a CodeView debug directory containing a PDB path.
+fn build_pe_with_pdb_path(pdb: &str) -> Vec<u8> {
+    let mut data = vec![0u8; 0x800];
+
+    // DOS header
+    data[0] = b'M'; data[1] = b'Z';
+    data[0x3C..0x40].copy_from_slice(&0x80u32.to_le_bytes());
+
+    // PE signature
+    data[0x80] = b'P'; data[0x81] = b'E';
+
+    // COFF header at 0x84
+    data[0x84..0x86].copy_from_slice(&0x014Cu16.to_le_bytes()); // i386
+    data[0x86..0x88].copy_from_slice(&1u16.to_le_bytes());      // 1 section
+    data[0x94..0x96].copy_from_slice(&0xE0u16.to_le_bytes());   // SizeOfOptionalHeader
+    data[0x96..0x98].copy_from_slice(&0x0102u16.to_le_bytes()); // Characteristics
+
+    // Optional header at 0x98
+    data[0x98..0x9A].copy_from_slice(&0x010Bu16.to_le_bytes()); // PE32 magic
+    data[0xB4..0xB8].copy_from_slice(&0x400000u32.to_le_bytes()); // ImageBase
+    data[0xB8..0xBC].copy_from_slice(&0x1000u32.to_le_bytes()); // SectionAlignment
+    data[0xBC..0xC0].copy_from_slice(&0x200u32.to_le_bytes());  // FileAlignment
+    data[0xD0..0xD4].copy_from_slice(&0x3000u32.to_le_bytes()); // SizeOfImage
+    data[0xD4..0xD8].copy_from_slice(&0x200u32.to_le_bytes());  // SizeOfHeaders
+    data[0xF4..0xF8].copy_from_slice(&16u32.to_le_bytes());     // NumberOfRvaAndSizes
+
+    // Data Directory[6] = Debug Directory: RVA=0x1000, Size=28 (1 entry)
+    let dd6_offset = 0xF8 + 6 * 8;
+    data[dd6_offset..dd6_offset + 4].copy_from_slice(&0x1000u32.to_le_bytes());
+    data[dd6_offset + 4..dd6_offset + 8].copy_from_slice(&28u32.to_le_bytes());
+
+    // Section header at 0x178 (.rdata covering RVA 0x1000)
+    let sh = 0x178;
+    data[sh..sh + 7].copy_from_slice(b".rdata\0");
+    data[sh + 8..sh + 12].copy_from_slice(&0x600u32.to_le_bytes());  // VirtualSize
+    data[sh + 12..sh + 16].copy_from_slice(&0x1000u32.to_le_bytes()); // VirtualAddress
+    data[sh + 16..sh + 20].copy_from_slice(&0x600u32.to_le_bytes());  // SizeOfRawData
+    data[sh + 20..sh + 24].copy_from_slice(&0x200u32.to_le_bytes());  // PointerToRawData
+    data[sh + 36..sh + 40].copy_from_slice(&0x40000040u32.to_le_bytes()); // READ|INITIALIZED_DATA
+
+    // Debug Directory Entry at file offset 0x200 (RVA 0x1000), 28 bytes
+    let dde = 0x200;
+    // Characteristics (0), TimeDateStamp, MajorVersion, MinorVersion
+    data[dde + 12..dde + 16].copy_from_slice(&2u32.to_le_bytes()); // Type = CodeView
+    let cv_size = (24 + pdb.len() + 1) as u32; // RSDS header + PDB path + null
+    data[dde + 16..dde + 20].copy_from_slice(&cv_size.to_le_bytes()); // SizeOfData
+    data[dde + 20..dde + 24].copy_from_slice(&0x1080u32.to_le_bytes()); // AddressOfRawData (RVA)
+    data[dde + 24..dde + 28].copy_from_slice(&0x280u32.to_le_bytes()); // PointerToRawData (file offset)
+
+    // CodeView RSDS data at file offset 0x280
+    let cv = 0x280;
+    data[cv..cv + 4].copy_from_slice(&0x53445352u32.to_le_bytes()); // "RSDS"
+    // GUID (16 bytes) at cv+4..cv+20 — leave as zeros
+    // Age at cv+20
+    data[cv + 20..cv + 24].copy_from_slice(&1u32.to_le_bytes());
+    // PDB path at cv+24
+    let pdb_bytes = pdb.as_bytes();
+    data[cv + 24..cv + 24 + pdb_bytes.len()].copy_from_slice(pdb_bytes);
+    data[cv + 24 + pdb_bytes.len()] = 0; // null terminator
+
+    data
+}
+
+#[test]
+fn opsec_001_fires_with_pdb_path() {
+    let pdb = r"C:\Users\attacker\repos\malware\Release\payload.pdb";
+    let data = build_pe_with_pdb_path(pdb);
+    let output = petriage_run_with_args(&data, &["--json"]);
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let val: serde_json::Value = serde_json::from_str(&stdout)
+        .expect("stdout should be valid JSON");
+    let anomalies = val.get("anomalies").expect("should have anomalies");
+    let arr = anomalies.as_array().expect("anomalies should be array");
+    let opsec = arr.iter().find(|a| a.get("rule_id").and_then(|v| v.as_str()) == Some("OPSEC-001"));
+    assert!(opsec.is_some(), "OPSEC-001 anomaly should be present, anomalies: {:?}", arr);
+    let opsec = opsec.unwrap();
+    assert_eq!(opsec.get("severity").and_then(|v| v.as_str()), Some("info"));
+    assert_eq!(opsec.get("category").and_then(|v| v.as_str()), Some("OPSEC"));
+    let evidence = opsec.get("evidence").and_then(|v| v.as_str()).unwrap_or("");
+    assert!(evidence.contains("payload.pdb"), "evidence should contain PDB path, got: {}", evidence);
+}
+
+#[test]
+fn opsec_001_fires_even_with_hashes_only() {
+    // OPSEC-001 anomaly should still appear in anomalies even with --hashes
+    let pdb = r"C:\Users\dev\build\test.pdb";
+    let data = build_pe_with_pdb_path(pdb);
+    let output = petriage_run_with_args(&data, &["--json", "--hashes"]);
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let val: serde_json::Value = serde_json::from_str(&stdout)
+        .expect("stdout should be valid JSON");
+    let anomalies = val.get("anomalies").expect("should have anomalies");
+    let arr = anomalies.as_array().expect("anomalies should be array");
+    let opsec = arr.iter().find(|a| a.get("rule_id").and_then(|v| v.as_str()) == Some("OPSEC-001"));
+    assert!(opsec.is_some(), "OPSEC-001 should fire even with --hashes filter");
+}
+
+#[test]
+fn hashes_only_excludes_debug_and_opsec_section() {
+    // --hashes should NOT include debug or OPSEC section in JSON output
+    let pdb = r"C:\Users\dev\build\test.pdb";
+    let data = build_pe_with_pdb_path(pdb);
+    let output = petriage_run_with_args(&data, &["--json", "--hashes"]);
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let val: serde_json::Value = serde_json::from_str(&stdout)
+        .expect("stdout should be valid JSON");
+    assert!(val.get("debug").is_none(),
+        "debug field should be absent with --hashes, got: {}", stdout);
+}
+
+#[test]
+fn hashes_only_text_excludes_opsec_header() {
+    // Text output with --hashes should NOT contain the OPSEC: PDB Path section
+    let pdb = r"C:\Users\dev\build\test.pdb";
+    let data = build_pe_with_pdb_path(pdb);
+    let output = petriage_run_with_args(&data, &["--hashes"]);
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(!stdout.contains("OPSEC: PDB Path"),
+        "text output with --hashes should not contain OPSEC section, got:\n{}", stdout);
+    assert!(stdout.contains("Hashes"),
+        "text output with --hashes should contain Hashes section");
+}
