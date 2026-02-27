@@ -1,3 +1,4 @@
+pub mod rich_db;
 pub mod analysis;
 pub mod output;
 #[cfg(feature = "gui")]

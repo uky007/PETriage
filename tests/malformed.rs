@@ -1404,3 +1404,194 @@ fn hashes_only_text_excludes_opsec_header() {
     assert!(stdout.contains("Hashes"),
         "text output with --hashes should contain Hashes section");
 }
+
+// --- Rich Header enhanced tests ---
+
+/// Build a PE with a Rich Header and a correctly computed XOR key (checksum).
+/// The checksum algorithm:
+///   checksum = dans_offset
+///     + sum(byte[i].rotate_left(i)) for i in 0..dans_offset, skip 0x3C..0x40
+///     + sum(comp_id.rotate_left(count & 0x1F)) for each entry
+fn build_pe_with_valid_rich_checksum() -> Vec<u8> {
+    let mut data = vec![0u8; 1024];
+    data[0] = b'M'; data[1] = b'Z';
+    // e_lfanew = 0x100
+    let e_lfanew: u32 = 0x100;
+    data[0x3C..0x40].copy_from_slice(&e_lfanew.to_le_bytes());
+
+    let dans_offset: usize = 0x80;
+    // One entry: comp_id=0x00930042, count=7
+    let comp_id: u32 = 0x00930042;
+    let count: u32 = 7;
+
+    // Compute checksum (which will become the XOR key)
+    let mut checksum: u32 = dans_offset as u32;
+    for i in 0..dans_offset {
+        if i >= 0x3C && i < 0x40 { continue; }
+        checksum = checksum.wrapping_add((data[i] as u32).rotate_left(i as u32));
+    }
+    checksum = checksum.wrapping_add(comp_id.rotate_left(count & 0x1F));
+    let xor_key = checksum;
+
+    // DanS at 0x80
+    let dans = 0x536E6144u32 ^ xor_key;
+    data[0x80..0x84].copy_from_slice(&dans.to_le_bytes());
+    // 3 padding dwords
+    for i in 0..3 {
+        let pad = 0u32 ^ xor_key;
+        let off = 0x84 + i * 4;
+        data[off..off + 4].copy_from_slice(&pad.to_le_bytes());
+    }
+    // Entry at 0x90
+    data[0x90..0x94].copy_from_slice(&(comp_id ^ xor_key).to_le_bytes());
+    data[0x94..0x98].copy_from_slice(&(count ^ xor_key).to_le_bytes());
+    // "Rich" marker at 0x98
+    data[0x98..0x9C].copy_from_slice(&0x68636952u32.to_le_bytes());
+    data[0x9C..0xA0].copy_from_slice(&xor_key.to_le_bytes());
+
+    // PE signature at 0x100
+    data[0x100] = b'P'; data[0x101] = b'E';
+    data[0x104] = 0x4c; data[0x105] = 0x01; // i386
+    data[0x106..0x108].copy_from_slice(&1u16.to_le_bytes()); // 1 section
+    data[0x114..0x116].copy_from_slice(&0xE0u16.to_le_bytes()); // SizeOfOptionalHeader
+    data[0x116..0x118].copy_from_slice(&0x0102u16.to_le_bytes()); // Characteristics
+    data[0x118..0x11A].copy_from_slice(&0x010Bu16.to_le_bytes()); // PE32
+    // SectionAlignment, FileAlignment, SizeOfImage, SizeOfHeaders
+    let opt_base = 0x118;
+    data[opt_base + 0x20..opt_base + 0x24].copy_from_slice(&0x1000u32.to_le_bytes());
+    data[opt_base + 0x24..opt_base + 0x28].copy_from_slice(&0x200u32.to_le_bytes());
+    data[opt_base + 0x38..opt_base + 0x3C].copy_from_slice(&0x3000u32.to_le_bytes());
+    data[opt_base + 0x3C..opt_base + 0x40].copy_from_slice(&0x200u32.to_le_bytes());
+    // NumberOfRvaAndSizes
+    data[opt_base + 0x5C..opt_base + 0x60].copy_from_slice(&16u32.to_le_bytes());
+    // Section header
+    let sh = 0x100 + 0x18 + 0xE0; // 0x1F8
+    if sh + 40 <= data.len() {
+        data[sh..sh + 6].copy_from_slice(b".text\0");
+        data[sh + 8..sh + 12].copy_from_slice(&0x1000u32.to_le_bytes());
+        data[sh + 12..sh + 16].copy_from_slice(&0x1000u32.to_le_bytes());
+        data[sh + 16..sh + 20].copy_from_slice(&0x200u32.to_le_bytes());
+        data[sh + 20..sh + 24].copy_from_slice(&0x200u32.to_le_bytes());
+        data[sh + 36..sh + 40].copy_from_slice(&0x60000020u32.to_le_bytes());
+    }
+    data
+}
+
+#[test]
+fn rich_header_hash_computed() {
+    // Verify the rich_hash field is computed (MD5 of XOR-decoded data)
+    let data = build_pe_with_valid_rich_checksum();
+    let output = petriage_run(&data);
+    if output.status.code() == Some(0) {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let val: serde_json::Value = serde_json::from_str(&stdout)
+            .expect("stdout should be valid JSON");
+        let rich = val.get("rich_header").expect("should have rich_header");
+        let hash = rich.get("rich_hash").expect("should have rich_hash field");
+        let hash_str = hash.as_str().expect("rich_hash should be string");
+        assert_eq!(hash_str.len(), 32, "MD5 hash should be 32 hex chars, got: {}", hash_str);
+        assert!(hash_str.chars().all(|c| c.is_ascii_hexdigit()),
+            "rich_hash should be hex: {}", hash_str);
+    }
+}
+
+#[test]
+fn rich_header_checksum_valid() {
+    // PE built with correctly computed XOR key → checksum_valid: true
+    let data = build_pe_with_valid_rich_checksum();
+    let output = petriage_run(&data);
+    if output.status.code() == Some(0) {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let val: serde_json::Value = serde_json::from_str(&stdout)
+            .expect("stdout should be valid JSON");
+        let rich = val.get("rich_header").expect("should have rich_header");
+        assert_eq!(rich["checksum_valid"], true,
+            "correctly computed XOR key should give checksum_valid: true");
+    }
+}
+
+#[test]
+fn rich_header_checksum_invalid_triggers_rich_001() {
+    // PE with wrong XOR key → checksum_valid: false + RICH-001 anomaly
+    let mut data = vec![0u8; 1024];
+    data[0] = b'M'; data[1] = b'Z';
+    data[0x3C..0x40].copy_from_slice(&0x100u32.to_le_bytes());
+
+    let xor_key: u32 = 0xDEADBEEF; // deliberately wrong
+    let dans = 0x536E6144u32 ^ xor_key;
+    data[0x80..0x84].copy_from_slice(&dans.to_le_bytes());
+    for i in 0..3 {
+        let pad = 0u32 ^ xor_key;
+        let off = 0x84 + i * 4;
+        data[off..off + 4].copy_from_slice(&pad.to_le_bytes());
+    }
+    let comp_id = 0x00930042u32 ^ xor_key;
+    let count = 7u32 ^ xor_key;
+    data[0x90..0x94].copy_from_slice(&comp_id.to_le_bytes());
+    data[0x94..0x98].copy_from_slice(&count.to_le_bytes());
+    data[0x98..0x9C].copy_from_slice(&0x68636952u32.to_le_bytes());
+    data[0x9C..0xA0].copy_from_slice(&xor_key.to_le_bytes());
+
+    data[0x100] = b'P'; data[0x101] = b'E';
+    data[0x104] = 0x4c; data[0x105] = 0x01;
+    data[0x106..0x108].copy_from_slice(&1u16.to_le_bytes());
+    data[0x114..0x116].copy_from_slice(&0xE0u16.to_le_bytes());
+    data[0x116..0x118].copy_from_slice(&0x0102u16.to_le_bytes());
+    data[0x118..0x11A].copy_from_slice(&0x010Bu16.to_le_bytes());
+
+    let output = petriage_run(&data);
+    if output.status.code() == Some(0) {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let val: serde_json::Value = serde_json::from_str(&stdout)
+            .expect("stdout should be valid JSON");
+        let rich = val.get("rich_header").expect("should have rich_header");
+        assert_eq!(rich["checksum_valid"], false,
+            "wrong XOR key should give checksum_valid: false");
+        // Check RICH-001 anomaly
+        let anomalies = val["anomalies"].as_array().expect("should have anomalies");
+        assert!(anomalies.iter().any(|a| a["rule_id"] == "RICH-001"),
+            "RICH-001 should fire for invalid checksum, anomalies: {:?}", anomalies);
+    }
+}
+
+#[test]
+fn rich_header_entries_have_comp_id_and_description() {
+    let data = build_pe_with_valid_rich_checksum();
+    let output = petriage_run(&data);
+    if output.status.code() == Some(0) {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let val: serde_json::Value = serde_json::from_str(&stdout)
+            .expect("stdout should be valid JSON");
+        let rich = val.get("rich_header").expect("should have rich_header");
+        let entries = rich["entries"].as_array().expect("entries should be array");
+        assert!(!entries.is_empty(), "should have at least one entry");
+        let e = &entries[0];
+        // comp_id should be hex string like "0x00930042"
+        let comp_id = e["comp_id"].as_str().expect("comp_id should be string");
+        assert!(comp_id.starts_with("0x"), "comp_id should be hex: {}", comp_id);
+        // description should exist
+        assert!(e.get("description").is_some(), "should have description field");
+        let desc = e["description"].as_str().expect("description should be string");
+        assert!(!desc.is_empty(), "description should not be empty");
+    }
+}
+
+#[test]
+fn rich_002_fires_for_pe_without_rich_header() {
+    // PE without Rich Header but with executable code section > 0x1000 bytes
+    let mut data = build_minimal_pe_with_cert_dd(0, 0);
+    // Extend to have a code section with raw_size > 0x1000
+    data.resize(0x2200, 0);
+    // Update section's SizeOfRawData to 0x2000 (> 0x1000 threshold)
+    let sh = 0x178; // section header offset in build_minimal_pe_with_cert_dd
+    data[sh + 16..sh + 20].copy_from_slice(&0x2000u32.to_le_bytes());
+    let output = petriage_run(&data);
+    if output.status.code() == Some(0) {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let val: serde_json::Value = serde_json::from_str(&stdout)
+            .expect("stdout should be valid JSON");
+        let anomalies = val["anomalies"].as_array().expect("should have anomalies");
+        assert!(anomalies.iter().any(|a| a["rule_id"] == "RICH-002"),
+            "RICH-002 should fire for PE without Rich Header, anomalies: {:?}", anomalies);
+    }
+}

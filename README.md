@@ -32,9 +32,9 @@ Malware analysts frequently examine Windows PE files, but the most capable surfa
 | Hashes | MD5, SHA1, SHA256 of the entire file, imphash (Mandiant-compatible import hash) |
 | Overlay | Detection of data appended beyond the PE structure |
 | Suspicious API Indicators | Auto-tags ~130 Windows APIs across 12 risk categories (Process Injection, Code Execution, Network, Evasion, etc.) with severity levels (high/medium/low) |
-| Anomaly Detection | 19 heuristic rules detecting packing indicators, W^X violations, missing security features (ASLR/DEP/CFG), timestamp anomalies, structural irregularities, suspicious API combos, and OPSEC indicators (PDB path leakage) |
+| Anomaly Detection | 21 heuristic rules detecting packing indicators, W^X violations, missing security features (ASLR/DEP/CFG), timestamp anomalies, structural irregularities, suspicious API combos, OPSEC indicators (PDB path leakage), and Rich Header integrity (checksum tampering, missing Rich Header) |
 | Resource Directory | Resource tree enumeration, VS_VERSIONINFO parsing (FileVersion, CompanyName, OriginalFilename, etc.), manifest extraction (UAC requestedExecutionLevel), embedded icon extraction and display (GUI) |
-| Rich Header | XOR key extraction, compiler/linker tool entries (prod_id, build_id, count). Enables compiler identification and build environment fingerprinting |
+| Rich Header | XOR key extraction, Rich Hash (MD5, YARA/VirusTotal compatible), checksum verification (tampering detection), compiler/linker tool entries (comp_id, prod_id, build_id, count) with Product ID database (~70 entries, VS 6.0--2022). Enables compiler identification, build environment fingerprinting, and attribution |
 | TLS Directory | TLS callback detection with VA listing. Critical for malware — TLS callbacks execute before main() and are commonly used for anti-debug/unpacking |
 | Debug Directory | Debug entry enumeration, CodeView (RSDS) parsing with PDB path, GUID, and age extraction. PDB paths are always parsed and surfaced as OPSEC indicators (highlighted in CLI and GUI) |
 | Authenticode | Digital signature presence detection, PKCS#7/CMS parsing, X.509 certificate chain extraction (subject, issuer, serial, validity, SHA-1 thumbprint), signer identification, expiry/self-signed/chain warnings. Cross-platform — no Windows CryptoAPI required. Trust verification is not performed. |
@@ -107,6 +107,8 @@ petriage <file.exe> --json | jq '.resources.version_info'                       
 petriage <file.exe> --json | jq '.resources.manifest'                            # Manifest XML
 petriage <file.exe> --json | jq '.authenticode'                                  # Authenticode info
 petriage <file.exe> --json | jq '.authenticode.signer'                           # Signer certificate
+petriage <file.exe> --json | jq '.rich_header'                                   # Rich Header info
+petriage <file.exe> --json | jq '.rich_header.rich_hash'                         # Rich Hash (YARA/VT compatible)
 petriage <file.exe> --ndjson       # Compact one-line JSON output
 petriage --batch <dir> --ndjson   # Batch-analyze all PEs in a directory (NDJSON output)
 petriage --batch <dir> --json     # Batch-analyze all PEs (JSON array output)
@@ -218,6 +220,18 @@ The GUI provides:
   [INFO] [OPSEC-001] OPSEC: PDB debug path found: C:\Users\dev\source\repos\malware\x64\Release\payload.pdb
   [INFO] Security: Control Flow Guard (GUARD_CF) is not enabled
   [INFO] Structure: Non-standard section name '.xpack'
+  [INFO] [RICH-002] Rich Header: No Rich Header found — PE may not have been built with MSVC toolchain
+  ...
+
+=== Rich Header ===
+  XOR Key:    0xaabbccdd
+  Rich Hash:  a1b2c3d4e5f67890abcdef1234567890
+  Checksum:   Valid
+
+  CompID         ProdID  BuildID    Count  Description
+  ------------ ------  -------  -------  ------------------------------
+  0x01070042      263       66        7  [C++] VS 2005 (build 66)
+  0x010a71b3      266    29107        1  [LNK] VS 2019 16.7 (build 29110)
   ...
 
 === Resources (12 entries) ===

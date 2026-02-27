@@ -304,14 +304,20 @@ pub struct CertificateEntry {
 pub struct RichHeaderInfo {
     pub xor_key: String,
     pub xor_key_raw: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rich_hash: Option<String>,
+    pub checksum_valid: bool,
     pub entries: Vec<RichEntry>,
 }
 
 #[derive(Clone, Debug, Serialize)]
 pub struct RichEntry {
-    pub build_id: u16,
+    pub comp_id: String,
     pub prod_id: u16,
+    pub build_id: u16,
     pub count: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -426,7 +432,10 @@ pub fn analyze(data: &[u8], pe: &PE, opts: &AnalysisOptions) -> AnalysisResult {
         None
     };
 
-    let rich_header = if opts.show_all { parse_rich_header(data) } else { None };
+    // Always parse rich header for anomaly detection (RICH-001/002),
+    // but only include in output when show_all so that "only" flags
+    // like --hashes don't get an unexpected section.
+    let rich_header_parsed = parse_rich_header(data);
     let tls = if opts.show_all { parse_tls(data, pe) } else { None };
     // Always parse debug for anomaly detection (OPSEC-001),
     // but only include in output when show_all so that "only" flags
@@ -437,8 +446,10 @@ pub fn analyze(data: &[u8], pe: &PE, opts: &AnalysisOptions) -> AnalysisResult {
 
     let anomalies = Some(detect_anomalies(
         &sections, &coff_header, &optional_header, &overlay, &suspicious_summary, &debug,
+        &rich_header_parsed,
     ));
 
+    let rich_header = if opts.show_all { rich_header_parsed } else { None };
     let debug_output = if opts.show_all { debug } else { None };
 
     AnalysisResult {
@@ -469,6 +480,7 @@ fn detect_anomalies(
     overlay: &Option<OverlayInfo>,
     suspicious_summary: &Option<SuspiciousSummary>,
     debug: &Option<DebugInfo>,
+    rich_header: &Option<RichHeaderInfo>,
 ) -> Vec<Anomaly> {
     let mut anomalies = Vec::new();
 
@@ -777,6 +789,39 @@ fn detect_anomalies(
                     severity: "info".into(),
                     description: format!("PDB debug path found: {}", pdb),
                     evidence: Some(pdb.clone()),
+                    threshold: None,
+                });
+            }
+        }
+    }
+
+    // RICH-001: Rich Header checksum mismatch (tampering / false flag, e.g. Olympic Destroyer)
+    if let Some(rich) = rich_header {
+        if !rich.checksum_valid {
+            anomalies.push(Anomaly {
+                rule_id: "RICH-001".into(),
+                category: "Rich Header".into(),
+                severity: "warning".into(),
+                description: "Rich Header checksum is invalid — possible tampering or false flag".into(),
+                evidence: Some(format!("xor_key={}", rich.xor_key)),
+                threshold: None,
+            });
+        }
+    }
+
+    // RICH-002: No Rich Header but has executable code section > 0x1000 bytes
+    if rich_header.is_none() {
+        if let Some(secs) = sections {
+            let has_code = secs.iter().any(|s| {
+                s.characteristics & 0x20000000 != 0 && s.raw_size > 0x1000
+            });
+            if has_code {
+                anomalies.push(Anomaly {
+                    rule_id: "RICH-002".into(),
+                    category: "Rich Header".into(),
+                    severity: "info".into(),
+                    description: "No Rich Header found — PE may not have been built with MSVC toolchain".into(),
+                    evidence: None,
                     threshold: None,
                 });
             }
@@ -2559,12 +2604,51 @@ fn parse_rich_header(data: &[u8]) -> Option<RichHeaderInfo> {
         return None;
     }
 
+    // Rich Hash: MD5 of the XOR-decoded data from DanS to Rich marker (YARA/VT compatible)
+    let rich_hash = {
+        let mut clear = Vec::with_capacity(encoded_end - encoded_start);
+        let mut i = encoded_start;
+        while i + 4 <= encoded_end {
+            let dword = read_u32_le(data, i) ^ xor_key;
+            clear.extend_from_slice(&dword.to_le_bytes());
+            i += 4;
+        }
+        let digest = Md5::digest(&clear);
+        Some(format!("{:x}", digest))
+    };
+
+    // Checksum verification: recompute XOR key from DOS header + Rich entries
+    let checksum_valid = {
+        let mut checksum = encoded_start as u32; // DanS offset
+        // Sum rotated bytes of DOS header (0..encoded_start), skipping e_lfanew (0x3C..0x40)
+        for i in 0..encoded_start {
+            if i >= 0x3C && i < 0x40 {
+                continue;
+            }
+            if i < data.len() {
+                checksum = checksum.wrapping_add((data[i] as u32).rotate_left(i as u32));
+            }
+        }
+        // Sum rotated comp_ids from Rich entries
+        let entries_start_ck = encoded_start + 16;
+        let mut off = entries_start_ck;
+        while off + 8 <= encoded_end {
+            let comp_id = read_u32_le(data, off) ^ xor_key;
+            let count = read_u32_le(data, off + 4) ^ xor_key;
+            checksum = checksum.wrapping_add(comp_id.rotate_left(count & 0x1F));
+            off += 8;
+        }
+        checksum == xor_key
+    };
+
     // Skip DanS + 3 padding dwords (16 bytes total)
     let entries_start = encoded_start + 16;
     if entries_start >= encoded_end {
         return Some(RichHeaderInfo {
             xor_key: format!("{:#010x}", xor_key),
             xor_key_raw: xor_key,
+            rich_hash,
+            checksum_valid,
             entries: Vec::new(),
         });
     }
@@ -2572,17 +2656,26 @@ fn parse_rich_header(data: &[u8]) -> Option<RichHeaderInfo> {
     let mut entries = Vec::new();
     let mut off = entries_start;
     while off + 8 <= encoded_end {
-        let comp_id = read_u32_le(data, off) ^ xor_key;
+        let comp_id_raw = read_u32_le(data, off) ^ xor_key;
         let count = read_u32_le(data, off + 4) ^ xor_key;
-        let build_id = (comp_id & 0xFFFF) as u16;
-        let prod_id = ((comp_id >> 16) & 0xFFFF) as u16;
-        entries.push(RichEntry { build_id, prod_id, count });
+        let build_id = (comp_id_raw & 0xFFFF) as u16;
+        let prod_id = ((comp_id_raw >> 16) & 0xFFFF) as u16;
+        let description = Some(crate::rich_db::lookup_rich_entry(prod_id, build_id));
+        entries.push(RichEntry {
+            comp_id: format!("{:#010x}", comp_id_raw),
+            prod_id,
+            build_id,
+            count,
+            description,
+        });
         off += 8;
     }
 
     Some(RichHeaderInfo {
         xor_key: format!("{:#010x}", xor_key),
         xor_key_raw: xor_key,
+        rich_hash,
+        checksum_valid,
         entries,
     })
 }

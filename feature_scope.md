@@ -28,11 +28,11 @@ These features are the minimum for a useful surface analysis tool. Every serious
 These features differentiate a good tool from a basic one. PEStudio, PE-bear, and PPEE all provide these.
 
 13. **Resource Directory**: resource tree parsing (types, names, languages, sizes), VS_VERSIONINFO parsing, manifest extraction, embedded icon extraction (RT_GROUP_ICON / RT_ICON → ICO reconstruction) and GUI display — **implemented**
-14. **Rich Header**: parsing, XOR key extraction, compiler/linker tool entries (comp.id, product.id, count) — **implemented**
+14. **Rich Header**: parsing, XOR key extraction, compiler/linker tool entries (comp.id, product.id, count), Rich Hash (MD5, YARA/VirusTotal compatible), checksum verification (tampering detection), Product ID database (~70 entries, VS 6.0–2022), comp_id hex display — **implemented**
 15. **TLS Directory**: TLS callback detection (critical for malware — callbacks run before main), PE32/PE32+ support, callback VA listing — **implemented**
 16. **Debug Directory**: PDB path, debug type (CodeView, COFF, etc.), GUID, age. PDB paths are always parsed (not gated by `--all`) and surfaced as OPSEC indicators in CLI (yellow highlight + dedicated section) and GUI (orange badge on Debug/File Info tabs) — **implemented**
 17. **Suspicious API Indicators**: ~130 APIs across 12 categories with 3-level severity (high/medium/low), CLI color-coding, GUI filtering — **implemented**
-18. **Anomaly Detection**: 19 heuristic rules with `rule_id`/`evidence`/`threshold` for JSON traceability. Covers packing (entropy, W^X, expansion ratio), security features (ASLR/DEP/CFG/SEH), timestamp anomalies, structural issues, suspicious API combos, and OPSEC indicators (OPSEC-001: PDB path leakage). All arithmetic uses checked/float operations to prevent overflow panics on crafted PEs — **implemented**
+18. **Anomaly Detection**: 21 heuristic rules with `rule_id`/`evidence`/`threshold` for JSON traceability. Covers packing (entropy, W^X, expansion ratio), security features (ASLR/DEP/CFG/SEH), timestamp anomalies, structural issues, suspicious API combos, OPSEC indicators (OPSEC-001: PDB path leakage), and Rich Header integrity (RICH-001: checksum tampering, RICH-002: missing Rich Header). All arithmetic uses checked/float operations to prevent overflow panics on crafted PEs — **implemented**
 19. **PE Header Editor (GUI)**: CFF Explorer-style header editing in the Editor tab. Editable fields: COFF header (TimeDateStamp, Characteristics with flag checkboxes), Optional header (AddressOfEntryPoint, ImageBase PE32/PE32+, SectionAlignment, FileAlignment, SizeOfImage, SizeOfHeaders, CheckSum, Subsystem, DllCharacteristics with 7 individual flag checkboxes), Section headers (Name, VirtualSize, VirtualAddress, SizeOfRawData, PointerToRawData, Characteristics with flag checkboxes). Modified fields highlighted, pending edits tracked, Save As writes patched PE. Boundary-checked: truncated optional headers show error instead of editable fields; OOB edits skipped on save; no-op edits are not tracked — **implemented**
 20. **Load Config Directory**: SEH handler table, CFG function table, guard flags — **not yet implemented**
 21. **TUI Hex Viewer**: interactive terminal hex viewer with PE region navigation, alternate screen mode (`--features tui`, `-x`/`--view` flag) — **implemented**
@@ -100,11 +100,12 @@ Options:
 ```
 src/
   main.rs           # CLI entry point, argument parsing, exit code contract
+  rich_db.rs        # Rich Header Product ID database (~70 entries, VS 6.0–2022)
   analysis.rs       # All PE analysis logic in one module:
                     #   headers, sections, imports, exports, strings,
                     #   hashes, entropy, overlay, resources (tree/version/manifest/icons),
                     #   suspicious API indicators (~130 APIs, 12 categories),
-                    #   anomaly detection (18 rules with rule_id/evidence/threshold),
+                    #   anomaly detection (21 rules with rule_id/evidence/threshold),
                     #   authenticode (PKCS#7/CMS + X.509 certificate chain)
   output.rs         # Human-readable and JSON formatting
   gui/mod.rs        # egui GUI entry point (optional, --features gui)

@@ -229,12 +229,21 @@ pub fn format_text(result: &AnalysisResult) -> String {
 
     if let Some(ref rich) = result.rich_header {
         out.push_str(&format!("=== Rich Header ===\n"));
-        out.push_str(&format!("  XOR Key:  {}\n", rich.xor_key));
+        out.push_str(&format!("  XOR Key:    {}\n", rich.xor_key));
+        if let Some(ref hash) = rich.rich_hash {
+            out.push_str(&format!("  Rich Hash:  {}\n", hash));
+        }
+        out.push_str(&format!("  Checksum:   {}\n",
+            if rich.checksum_valid { "Valid" } else { "Invalid" }));
         if !rich.entries.is_empty() {
-            out.push_str(&format!("\n  {:<8} {:<8} {:>8}\n", "ProdID", "BuildID", "Count"));
-            out.push_str(&format!("  {:-<8} {:-<8} {:-<8}\n", "", "", ""));
+            out.push_str(&format!("\n  {:<12} {:>6}  {:>7}  {:>7}  {}\n",
+                "CompID", "ProdID", "BuildID", "Count", "Description"));
+            out.push_str(&format!("  {:-<12} {:-<6}  {:-<7}  {:-<7}  {:-<30}\n",
+                "", "", "", "", ""));
             for e in &rich.entries {
-                out.push_str(&format!("  {:<8} {:<8} {:>8}\n", e.prod_id, e.build_id, e.count));
+                out.push_str(&format!("  {:<12} {:>6}  {:>7}  {:>7}  {}\n",
+                    e.comp_id, e.prod_id, e.build_id, e.count,
+                    e.description.as_deref().unwrap_or("")));
             }
         }
         out.push('\n');
