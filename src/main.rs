@@ -209,11 +209,10 @@ fn main() {
         for path in &entries {
             match analyze_file(path, show_all, &cli) {
                 Ok(result) => {
-                    if let Some(ref threshold) = cli.fail_on {
-                        if check_fail_on(&result, threshold) {
+                    if let Some(ref threshold) = cli.fail_on
+                        && check_fail_on(&result, threshold) {
                             any_fail_on = true;
                         }
-                    }
                     if cli.ndjson {
                         ndjson_buf.push_str(&output::format_ndjson(&result));
                     } else {
@@ -339,11 +338,10 @@ fn main() {
         print!("{}", output_text);
     }
 
-    if let Some(ref threshold) = cli.fail_on {
-        if check_fail_on(&result, threshold) {
+    if let Some(ref threshold) = cli.fail_on
+        && check_fail_on(&result, threshold) {
             process::exit(3);
         }
-    }
 }
 
 fn exit_error(message: &str, json_mode: bool, code: i32) -> ! {

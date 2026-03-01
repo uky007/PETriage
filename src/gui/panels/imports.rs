@@ -13,21 +13,13 @@ const RISK_HIGH: Color32 = Color32::from_rgb(255, 70, 70);
 const RISK_MEDIUM: Color32 = Color32::from_rgb(255, 200, 50);
 const RISK_LOW: Color32 = Color32::from_rgb(0, 200, 220);
 
+#[derive(Default)]
 pub struct ImportsState {
     pub filter: String,
     pub selected_dll: Option<usize>,
     pub show_suspicious_only: bool,
 }
 
-impl Default for ImportsState {
-    fn default() -> Self {
-        Self {
-            filter: String::new(),
-            selected_dll: None,
-            show_suspicious_only: false,
-        }
-    }
-}
 
 pub fn show(ui: &mut Ui, result: &AnalysisResult, state: &mut ImportsState) {
     let imports = match result.imports {
@@ -52,11 +44,10 @@ pub fn show(ui: &mut Ui, result: &AnalysisResult, state: &mut ImportsState) {
                 .hint_text("Filter APIs...")
                 .desired_width(250.0),
         );
-        if !state.filter.is_empty() {
-            if ui.small_button("\u{2715}").clicked() {
+        if !state.filter.is_empty()
+            && ui.small_button("\u{2715}").clicked() {
                 state.filter.clear();
             }
-        }
         ui.separator();
         ui.checkbox(&mut state.show_suspicious_only, egui::RichText::new("Suspicious only").color(RISK_HIGH));
     });

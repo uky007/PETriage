@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2024"
 description = "Cross-platform PE file surface analysis tool for malware analysts"
 license = "Apache-2.0"
+repository = "https://github.com/uky007/petriage"
+homepage = "https://github.com/uky007/petriage"
+documentation = "https://docs.rs/petriage"
 
 [[bin]]
 name = "petriage"

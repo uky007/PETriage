@@ -48,11 +48,10 @@ pub fn show(ui: &mut Ui, result: &AnalysisResult, state: &mut StringsState) {
                 .hint_text("Filter strings...")
                 .desired_width(250.0),
         );
-        if !state.filter.is_empty() {
-            if ui.small_button("\u{2715}").clicked() {
+        if !state.filter.is_empty()
+            && ui.small_button("\u{2715}").clicked() {
                 state.filter.clear();
             }
-        }
         ui.separator();
         ui.colored_label(LABEL, "Encoding:");
         let enc_btn = |val: EncodingFilter, label: &str, current: &mut EncodingFilter, ui: &mut Ui| {

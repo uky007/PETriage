@@ -53,8 +53,8 @@ pub fn show(ui: &mut Ui, result: &AnalysisResult, primary_icon: Option<&TextureH
             });
     }
 
-    if let Some(ref summary) = result.suspicious_summary {
-        if summary.total_suspicious > 0 {
+    if let Some(ref summary) = result.suspicious_summary
+        && summary.total_suspicious > 0 {
             ui.add_space(16.0);
             ui.colored_label(RISK_HIGH, egui::RichText::new("SUSPICIOUS API INDICATORS").size(14.0));
             ui.add_space(6.0);
@@ -87,7 +87,6 @@ pub fn show(ui: &mut Ui, result: &AnalysisResult, primary_icon: Option<&TextureH
                         });
                 });
         }
-    }
 
     // OPSEC Indicator: PDB Path
     if let Some(ref debug) = result.debug {
@@ -114,8 +113,8 @@ pub fn show(ui: &mut Ui, result: &AnalysisResult, primary_icon: Option<&TextureH
         }
     }
 
-    if let Some(ref anomalies) = result.anomalies {
-        if !anomalies.is_empty() {
+    if let Some(ref anomalies) = result.anomalies
+        && !anomalies.is_empty() {
             ui.add_space(16.0);
             ui.colored_label(RISK_HIGH, egui::RichText::new("ANOMALY DETECTION").size(14.0));
             ui.add_space(6.0);
@@ -163,7 +162,6 @@ pub fn show(ui: &mut Ui, result: &AnalysisResult, primary_icon: Option<&TextureH
                         });
                 });
         }
-    }
 }
 
 fn severity_badge(ui: &mut Ui, label: &str, count: usize, color: Color32) {

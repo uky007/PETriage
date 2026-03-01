@@ -59,12 +59,11 @@ impl EditorState {
     fn set_value(&mut self, offset: usize, size: usize, old_value: u64, new_value: u64, label: &str) {
         if old_value == new_value {
             // Remove edit if reverted to original
-            if let Some(idx) = self.find_edit(offset) {
-                if self.edits[idx].old_value == new_value {
+            if let Some(idx) = self.find_edit(offset)
+                && self.edits[idx].old_value == new_value {
                     self.edits.remove(idx);
                     self.dirty = !self.edits.is_empty();
                 }
-            }
             return;
         }
         if let Some(idx) = self.find_edit(offset) {
@@ -392,8 +391,8 @@ pub fn show(ui: &mut Ui, data: &[u8], state: &mut EditorState) {
         .stroke(egui::Stroke::new(1.0, if state.dirty { ACCENT } else { Color32::from_rgb(60, 60, 80) }))
         .corner_radius(egui::CornerRadius::same(4));
 
-        if ui.add_enabled(state.dirty, save_btn).clicked() {
-            if let Some(path) = rfd::FileDialog::new()
+        if ui.add_enabled(state.dirty, save_btn).clicked()
+            && let Some(path) = rfd::FileDialog::new()
                 .add_filter("PE files", &["exe", "dll", "sys", "ocx", "scr"])
                 .add_filter("All files", &["*"])
                 .save_file()
@@ -411,7 +410,6 @@ pub fn show(ui: &mut Ui, data: &[u8], state: &mut EditorState) {
                     }
                 }
             }
-        }
 
         let reset_btn = egui::Button::new(
             egui::RichText::new("Reset").color(Color32::WHITE),

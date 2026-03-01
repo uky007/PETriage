@@ -90,7 +90,7 @@ pub enum AppState {
     Loaded {
         file_name: String,
         data: Vec<u8>,
-        result: AnalysisResult,
+        result: Box<AnalysisResult>,
     },
     Error(String),
 }

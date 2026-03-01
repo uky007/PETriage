@@ -207,6 +207,7 @@ pub struct OverlayInfo {
 }
 
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 pub struct IconGroup {
     pub name: String,
     pub ico_bytes: Vec<u8>,
@@ -214,6 +215,7 @@ pub struct IconGroup {
 }
 
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 pub struct IconImage {
     pub width: u32,
     pub height: u32,
@@ -229,6 +231,7 @@ pub struct ResourceInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub manifest: Option<String>,
     #[serde(skip)]
+    #[allow(dead_code)]
     pub icon_data: Vec<IconGroup>,
 }
 
@@ -589,8 +592,8 @@ fn detect_anomalies(
                     let end = start + s.virtual_size as u64;
                     ep >= start && ep < end
                 });
-                if let Some(sec) = ep_section {
-                    if sec.name != ".text" {
+                if let Some(sec) = ep_section
+                    && sec.name != ".text" {
                         anomalies.push(Anomaly {
                             rule_id: "CODE-002".into(),
                             category: "Code Integrity".into(),
@@ -603,7 +606,6 @@ fn detect_anomalies(
                             threshold: None,
                         });
                     }
-                }
             }
         }
 
@@ -732,8 +734,8 @@ fn detect_anomalies(
     }
 
     // Rule 14: Overlay detected
-    if let Some(overlay) = overlay {
-        if overlay.present {
+    if let Some(overlay) = overlay
+        && overlay.present {
             anomalies.push(Anomaly {
                 rule_id: "STRUCT-002".into(),
                 category: "Structure".into(),
@@ -746,7 +748,6 @@ fn detect_anomalies(
                 threshold: None,
             });
         }
-    }
 
     // Suspicious combo rules (Rules 17-18)
     if let Some(summary) = suspicious_summary {
@@ -796,8 +797,8 @@ fn detect_anomalies(
     }
 
     // RICH-001: Rich Header checksum mismatch (tampering / false flag, e.g. Olympic Destroyer)
-    if let Some(rich) = rich_header {
-        if !rich.checksum_valid {
+    if let Some(rich) = rich_header
+        && !rich.checksum_valid {
             anomalies.push(Anomaly {
                 rule_id: "RICH-001".into(),
                 category: "Rich Header".into(),
@@ -807,11 +808,10 @@ fn detect_anomalies(
                 threshold: None,
             });
         }
-    }
 
     // RICH-002: No Rich Header but has executable code section > 0x1000 bytes
-    if rich_header.is_none() {
-        if let Some(secs) = sections {
+    if rich_header.is_none()
+        && let Some(secs) = sections {
             let has_code = secs.iter().any(|s| {
                 s.characteristics & 0x20000000 != 0 && s.raw_size > 0x1000
             });
@@ -826,7 +826,6 @@ fn detect_anomalies(
                 });
             }
         }
-    }
 
     anomalies
 }
@@ -1318,7 +1317,7 @@ fn extract_strings(data: &[u8], min_len: usize) -> Vec<StringEntry> {
     let mut current = Vec::new();
     let mut start = 0;
     for (i, &byte) in data.iter().enumerate() {
-        if byte >= 0x20 && byte < 0x7f {
+        if (0x20..0x7f).contains(&byte) {
             if current.is_empty() {
                 start = i;
             }
@@ -1358,7 +1357,7 @@ fn extract_strings(data: &[u8], min_len: usize) -> Vec<StringEntry> {
         let mut i = 0;
         while i + 1 < data.len() {
             let wchar = u16::from_le_bytes([data[i], data[i + 1]]);
-            if wchar >= 0x20 && wchar < 0x7f {
+            if (0x20..0x7f).contains(&wchar) {
                 if current_u16.is_empty() {
                     start_u16 = i;
                 }
@@ -1756,6 +1755,7 @@ fn parse_resources(data: &[u8], pe: &PE) -> Option<ResourceInfo> {
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn parse_resource_directory(
     data: &[u8],
     pe: &PE,
@@ -1954,12 +1954,11 @@ fn parse_vs_versioninfo(data: &[u8]) -> Option<VersionInfo> {
         let _child_value_length = read_u16_le(data, pos + 2);
         let _child_type = read_u16_le(data, pos + 4);
 
-        if let Some(child_key) = read_utf16_string_until_null(data, pos + 6) {
-            if child_key == "StringFileInfo" {
+        if let Some(child_key) = read_utf16_string_until_null(data, pos + 6)
+            && child_key == "StringFileInfo" {
                 let si_strings = parse_string_file_info(data, pos);
                 string_info.extend(si_strings);
             }
-        }
 
         pos = align_up(pos + child_length, 4);
     }
@@ -2622,7 +2621,7 @@ fn parse_rich_header(data: &[u8]) -> Option<RichHeaderInfo> {
         let mut checksum = encoded_start as u32; // DanS offset
         // Sum rotated bytes of DOS header (0..encoded_start), skipping e_lfanew (0x3C..0x40)
         for i in 0..encoded_start {
-            if i >= 0x3C && i < 0x40 {
+            if (0x3C..0x40).contains(&i) {
                 continue;
             }
             if i < data.len() {

@@ -47,26 +47,24 @@ impl App {
     }
 
     fn select_prev(&mut self) {
-        if let Some(i) = self.list_state.selected() {
-            if i > 0 {
+        if let Some(i) = self.list_state.selected()
+            && i > 0 {
                 self.list_state.select(Some(i - 1));
                 self.hex_scroll = 0;
             }
-        }
     }
 
     fn select_next(&mut self) {
-        if let Some(i) = self.list_state.selected() {
-            if i + 1 < self.regions.len() {
+        if let Some(i) = self.list_state.selected()
+            && i + 1 < self.regions.len() {
                 self.list_state.select(Some(i + 1));
                 self.hex_scroll = 0;
             }
-        }
     }
 
     fn hex_lines_count(&self) -> usize {
         self.selected_region()
-            .map(|r| (r.size + 15) / 16)
+            .map(|r| r.size.div_ceil(16))
             .unwrap_or(0)
     }
 
@@ -189,7 +187,7 @@ fn render_hex_lines<'a>(data: &'a [u8], region: &Region, scroll: usize, max_line
     let ascii_style = Style::default().fg(Color::DarkGray);
     let default_style = Style::default();
 
-    let total_lines = (region.size + 15) / 16;
+    let total_lines = region.size.div_ceil(16);
     let start_line = scroll.min(total_lines);
     let end_line = (start_line + max_lines).min(total_lines);
 
@@ -401,8 +399,8 @@ pub fn run(data: &[u8], pe: &PE, file_name: &str) -> io::Result<()> {
     while !app.quit {
         terminal.draw(|f| draw(f, &app, data, file_name))?;
 
-        if event::poll(std::time::Duration::from_millis(100))? {
-            if let Event::Key(key) = event::read()? {
+        if event::poll(std::time::Duration::from_millis(100))?
+            && let Event::Key(key) = event::read()? {
                 if key.kind != KeyEventKind::Press {
                     continue;
                 }
@@ -423,7 +421,6 @@ pub fn run(data: &[u8], pe: &PE, file_name: &str) -> io::Result<()> {
                     _ => {}
                 }
             }
-        }
     }
 
     disable_raw_mode()?;

@@ -108,21 +108,13 @@ fn setup_style(ctx: &egui::Context) {
     ctx.set_style(style);
 }
 
+#[derive(Default)]
 struct IconCache {
     primary_icon: Option<TextureHandle>,
     all_icons: Vec<(String, Vec<(String, TextureHandle)>)>,
     populated: bool,
 }
 
-impl Default for IconCache {
-    fn default() -> Self {
-        Self {
-            primary_icon: None,
-            all_icons: Vec::new(),
-            populated: false,
-        }
-    }
-}
 
 fn decode_ico_to_textures(
     ctx: &egui::Context,
@@ -202,7 +194,7 @@ impl ReadpeApp {
                         self.state = AppState::Loaded {
                             file_name,
                             data,
-                            result,
+                            result: Box::new(result),
                         };
                     }
                     Err(e) => {
@@ -244,7 +236,7 @@ impl ReadpeApp {
                     self.state = AppState::Loaded {
                         file_name,
                         data,
-                        result,
+                        result: Box::new(result),
                     };
                 }
                 Err(e) => {
@@ -268,7 +260,7 @@ impl ReadpeApp {
 impl eframe::App for ReadpeApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // Handle dropped files
-        ctx.input(|i| {
+        if let Some(p) = ctx.input(|i| {
             if let Some(dropped) = i.raw.dropped_files.first() {
                 if let Some(path) = &dropped.path {
                     let path = path.clone();
@@ -278,7 +270,9 @@ impl eframe::App for ReadpeApp {
             } else {
                 None
             }
-        }).and_then(|p| { self.load_file(p); Some(()) });
+        }) {
+            self.load_file(p);
+        }
 
         // Menu bar
         egui::TopBottomPanel::top("menu_bar")

@@ -3,7 +3,7 @@
 /// Maps (prod_id, build_id) pairs to human-readable descriptions like
 /// `[C++] VS 2019 (build 29xxx)`.  Based on data from richprint, VB2019
 /// paper ("Finding the Needle"), and Microsoft documentation.
-
+///
 /// Tool type lookup by prod_id.
 const TOOL_TYPES: &[(u16, &str)] = &[
     // Imports

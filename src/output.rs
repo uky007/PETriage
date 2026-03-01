@@ -34,7 +34,7 @@ pub fn format_text(result: &AnalysisResult) -> String {
     let mut out = String::new();
 
     if let Some(ref info) = result.file_info {
-        out.push_str(&format!("=== File Info ===\n"));
+        out.push_str("=== File Info ===\n");
         out.push_str(&format!("  File:    {}\n", info.name));
         out.push_str(&format!("  Size:    {} bytes ({:.2} KB)\n", info.size, info.size as f64 / 1024.0));
         out.push_str(&format!("  Type:    {}\n", info.pe_type));
@@ -56,7 +56,7 @@ pub fn format_text(result: &AnalysisResult) -> String {
     }
 
     if let Some(ref hashes) = result.hashes {
-        out.push_str(&format!("=== Hashes ===\n"));
+        out.push_str("=== Hashes ===\n");
         out.push_str(&format!("  MD5:     {}\n", hashes.md5));
         out.push_str(&format!("  SHA1:    {}\n", hashes.sha1));
         out.push_str(&format!("  SHA256:  {}\n", hashes.sha256));
@@ -67,14 +67,14 @@ pub fn format_text(result: &AnalysisResult) -> String {
     }
 
     if let Some(ref dos) = result.dos_header {
-        out.push_str(&format!("=== DOS Header ===\n"));
+        out.push_str("=== DOS Header ===\n");
         out.push_str(&format!("  e_magic:   {}\n", dos.e_magic));
         out.push_str(&format!("  e_lfanew:  {:#x}\n", dos.e_lfanew));
         out.push('\n');
     }
 
     if let Some(ref coff) = result.coff_header {
-        out.push_str(&format!("=== COFF Header ===\n"));
+        out.push_str("=== COFF Header ===\n");
         out.push_str(&format!("  Machine:              {} ({:#06x})\n", coff.machine, coff.machine_raw));
         out.push_str(&format!("  NumberOfSections:     {}\n", coff.number_of_sections));
         out.push_str(&format!("  TimeDateStamp:        {:#010x} ({})\n", coff.time_date_stamp, coff.time_date_stamp_str));
@@ -89,7 +89,7 @@ pub fn format_text(result: &AnalysisResult) -> String {
     }
 
     if let Some(ref opt) = result.optional_header {
-        out.push_str(&format!("=== Optional Header ===\n"));
+        out.push_str("=== Optional Header ===\n");
         out.push_str(&format!("  Magic:                 {}\n", opt.magic));
         out.push_str(&format!("  LinkerVersion:         {}.{}\n", opt.major_linker_version, opt.minor_linker_version));
         out.push_str(&format!("  SizeOfCode:            {:#x}\n", opt.size_of_code));
@@ -109,7 +109,7 @@ pub fn format_text(result: &AnalysisResult) -> String {
         out.push_str(&format!("  NumberOfRvaAndSizes:   {}\n", opt.number_of_rva_and_sizes));
 
         if !opt.data_directories.is_empty() {
-            out.push_str(&format!("\n  Data Directories:\n"));
+            out.push_str("\n  Data Directories:\n");
             out.push_str(&format!("  {:<28} {:>12} {:>12}\n", "Name", "RVA", "Size"));
             out.push_str(&format!("  {:-<28} {:-<12} {:-<12}\n", "", "", ""));
             for dd in &opt.data_directories {
@@ -160,9 +160,9 @@ pub fn format_text(result: &AnalysisResult) -> String {
         out.push('\n');
     }
 
-    if let Some(ref summary) = result.suspicious_summary {
-        if summary.total_suspicious > 0 {
-            out.push_str(&format!("=== Suspicious API Summary ===\n"));
+    if let Some(ref summary) = result.suspicious_summary
+        && summary.total_suspicious > 0 {
+            out.push_str("=== Suspicious API Summary ===\n");
             out.push_str(&format!("  Total suspicious APIs: {}\n", summary.total_suspicious));
             out.push_str(&format!("  {} {} {}\n",
                 format!("HIGH: {}", summary.high_count).red().bold(),
@@ -176,10 +176,9 @@ pub fn format_text(result: &AnalysisResult) -> String {
             }
             out.push('\n');
         }
-    }
 
-    if let Some(ref anomalies) = result.anomalies {
-        if !anomalies.is_empty() {
+    if let Some(ref anomalies) = result.anomalies
+        && !anomalies.is_empty() {
             out.push_str("=== Anomaly Detection ===\n");
             let critical = anomalies.iter().filter(|a| a.severity == "critical").count();
             let warning = anomalies.iter().filter(|a| a.severity == "warning").count();
@@ -201,10 +200,9 @@ pub fn format_text(result: &AnalysisResult) -> String {
             }
             out.push('\n');
         }
-    }
 
-    if let Some(ref exports) = result.exports {
-        if !exports.is_empty() {
+    if let Some(ref exports) = result.exports
+        && !exports.is_empty() {
             out.push_str(&format!("=== Exports ({}) ===\n", exports.len()));
             out.push_str(&format!("  {:<6} {:<12} {}\n", "Ord", "RVA", "Name"));
             out.push_str(&format!("  {:-<6} {:-<12} {:-<30}\n", "", "", ""));
@@ -213,22 +211,21 @@ pub fn format_text(result: &AnalysisResult) -> String {
             }
             out.push('\n');
         }
-    }
 
     if let Some(ref overlay) = result.overlay {
-        out.push_str(&format!("=== Overlay ===\n"));
+        out.push_str("=== Overlay ===\n");
         if overlay.present {
-            out.push_str(&format!("  Present:  Yes\n"));
+            out.push_str("  Present:  Yes\n");
             out.push_str(&format!("  Offset:   {:#x}\n", overlay.offset));
             out.push_str(&format!("  Size:     {} bytes ({:.2} KB)\n", overlay.size, overlay.size as f64 / 1024.0));
         } else {
-            out.push_str(&format!("  Present:  No\n"));
+            out.push_str("  Present:  No\n");
         }
         out.push('\n');
     }
 
     if let Some(ref rich) = result.rich_header {
-        out.push_str(&format!("=== Rich Header ===\n"));
+        out.push_str("=== Rich Header ===\n");
         out.push_str(&format!("  XOR Key:    {}\n", rich.xor_key));
         if let Some(ref hash) = rich.rich_hash {
             out.push_str(&format!("  Rich Hash:  {}\n", hash));
@@ -334,14 +331,14 @@ pub fn format_text(result: &AnalysisResult) -> String {
         out.push_str(&format!("  Trust Verified:  {}\n", if auth.trust_verified { "Yes" } else { "No (not implemented)" }));
 
         if let Some(ref wc) = auth.win_certificate {
-            out.push_str(&format!("\n  WIN_CERTIFICATE:\n"));
+            out.push_str("\n  WIN_CERTIFICATE:\n");
             out.push_str(&format!("    Length:   {} bytes\n", wc.length));
             out.push_str(&format!("    Revision: {} ({:#06x})\n", wc.revision, wc.revision_raw));
             out.push_str(&format!("    Type:     {} ({:#06x})\n", wc.certificate_type, wc.certificate_type_raw));
         }
 
         if let Some(ref signer) = auth.signer {
-            out.push_str(&format!("\n  Signer:\n"));
+            out.push_str("\n  Signer:\n");
             out.push_str(&format!("    Subject:    {}\n", signer.subject));
             out.push_str(&format!("    Issuer:     {}\n", signer.issuer));
             out.push_str(&format!("    Serial:     {}\n", signer.serial));
@@ -365,7 +362,7 @@ pub fn format_text(result: &AnalysisResult) -> String {
         }
 
         if !auth.warnings.is_empty() {
-            out.push_str(&format!("\n  Warnings:\n"));
+            out.push_str("\n  Warnings:\n");
             for w in &auth.warnings {
                 out.push_str(&format!("    ! {}\n", w));
             }
