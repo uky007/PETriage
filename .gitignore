@@ -1,3 +1,6 @@
 /target
 *.exe
+THIRD_PARTY_LICENSES.html
+about.hbs
+about.toml
 readpe.md

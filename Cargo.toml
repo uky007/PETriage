@@ -7,7 +7,15 @@ license = "MIT"
 repository = "https://github.com/uky007/petriage"
 homepage = "https://github.com/uky007/petriage"
 documentation = "https://docs.rs/petriage"
-exclude = ["CLAUDE.md", "survey_results.md", "feature_scope.md", "notes/"]
+exclude = [
+  "CLAUDE.md",
+  "survey_results.md",
+  "feature_scope.md",
+  "notes/",
+  "THIRD_PARTY_LICENSES.html",
+  "about.hbs",
+  "about.toml",
+]
 
 [[bin]]
 name = "petriage"
