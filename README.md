@@ -327,4 +327,4 @@ When `--json` or `--ndjson` is used, errors are output to stderr as JSON: `{"err
 
 ## License
 
-Apache-2.0
+MIT

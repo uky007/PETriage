@@ -214,8 +214,8 @@ fn anomaly_json_has_rule_id() {
     let output = petriage_run(&data);
     if output.status.code() == Some(0) {
         let stdout = String::from_utf8_lossy(&output.stdout);
-        if let Ok(val) = serde_json::from_str::<serde_json::Value>(&stdout) {
-            if let Some(anomalies) = val.get("anomalies").and_then(|a| a.as_array()) {
+        if let Ok(val) = serde_json::from_str::<serde_json::Value>(&stdout)
+            && let Some(anomalies) = val.get("anomalies").and_then(|a| a.as_array()) {
                 for anomaly in anomalies {
                     assert!(
                         anomaly.get("rule_id").is_some(),
@@ -224,7 +224,6 @@ fn anomaly_json_has_rule_id() {
                     );
                 }
             }
-        }
     }
 }
 
@@ -547,7 +546,7 @@ fn authenticode_dwlength_exceeds_cert_size() {
         assert_eq!(auth["parse_ok"], false);
         let warnings = auth["warnings"].as_array().expect("warnings should be array");
         let has_dwlength_warning = warnings.iter().any(|w| {
-            w.as_str().map_or(false, |s| s.contains("dwLength") && s.contains("exceeds"))
+            w.as_str().is_some_and(|s| s.contains("dwLength") && s.contains("exceeds"))
         });
         assert!(has_dwlength_warning,
             "should warn about dwLength exceeding cert_size, got: {:?}", warnings);
@@ -587,7 +586,7 @@ fn authenticode_wrong_content_type_oid() {
         assert_eq!(auth["parse_ok"], false);
         let warnings = auth["warnings"].as_array().expect("warnings should be array");
         let has_oid_warning = warnings.iter().any(|w| {
-            w.as_str().map_or(false, |s| s.contains("content_type") && s.contains("signedData"))
+            w.as_str().is_some_and(|s| s.contains("content_type") && s.contains("signedData"))
         });
         assert!(has_oid_warning,
             "should warn about wrong content_type OID, got: {:?}", warnings);
@@ -769,9 +768,8 @@ fn rich_header_present_in_pe_with_rich() {
     data[0x80..0x84].copy_from_slice(&dans.to_le_bytes());
     // 3 padding dwords (XOR key)
     for i in 0..3 {
-        let pad = 0u32 ^ xor_key;
         let off = 0x84 + i * 4;
-        data[off..off + 4].copy_from_slice(&pad.to_le_bytes());
+        data[off..off + 4].copy_from_slice(&xor_key.to_le_bytes());
     }
 
     // One Rich entry at 0x90: comp_id=0x00930042 (prod_id=0x0093, build_id=0x0042), count=7
@@ -1033,7 +1031,7 @@ fn build_pe_with_imports() -> Vec<u8> {
     data[0xD4..0xD8].copy_from_slice(&0x200u32.to_le_bytes());  // SizeOfHeaders
     data[0xF4..0xF8].copy_from_slice(&16u32.to_le_bytes());     // NumberOfRvaAndSizes
     // Data Directory[1] = Import Table: RVA=0x1000, Size=0x28 (2 entries: 1 real + 1 null terminator)
-    let dd1_offset = 0xF8 + 1 * 8;
+    let dd1_offset = 0xF8 + 8;
     data[dd1_offset..dd1_offset + 4].copy_from_slice(&0x1000u32.to_le_bytes());
     data[dd1_offset + 4..dd1_offset + 8].copy_from_slice(&0x28u32.to_le_bytes());
 
@@ -1426,9 +1424,9 @@ fn build_pe_with_valid_rich_checksum() -> Vec<u8> {
 
     // Compute checksum (which will become the XOR key)
     let mut checksum: u32 = dans_offset as u32;
-    for i in 0..dans_offset {
-        if i >= 0x3C && i < 0x40 { continue; }
-        checksum = checksum.wrapping_add((data[i] as u32).rotate_left(i as u32));
+    for (i, &byte) in data[..dans_offset].iter().enumerate() {
+        if (0x3C..0x40).contains(&i) { continue; }
+        checksum = checksum.wrapping_add((byte as u32).rotate_left(i as u32));
     }
     checksum = checksum.wrapping_add(comp_id.rotate_left(count & 0x1F));
     let xor_key = checksum;
@@ -1438,9 +1436,8 @@ fn build_pe_with_valid_rich_checksum() -> Vec<u8> {
     data[0x80..0x84].copy_from_slice(&dans.to_le_bytes());
     // 3 padding dwords
     for i in 0..3 {
-        let pad = 0u32 ^ xor_key;
         let off = 0x84 + i * 4;
-        data[off..off + 4].copy_from_slice(&pad.to_le_bytes());
+        data[off..off + 4].copy_from_slice(&xor_key.to_le_bytes());
     }
     // Entry at 0x90
     data[0x90..0x94].copy_from_slice(&(comp_id ^ xor_key).to_le_bytes());
@@ -1521,9 +1518,8 @@ fn rich_header_checksum_invalid_triggers_rich_001() {
     let dans = 0x536E6144u32 ^ xor_key;
     data[0x80..0x84].copy_from_slice(&dans.to_le_bytes());
     for i in 0..3 {
-        let pad = 0u32 ^ xor_key;
         let off = 0x84 + i * 4;
-        data[off..off + 4].copy_from_slice(&pad.to_le_bytes());
+        data[off..off + 4].copy_from_slice(&xor_key.to_le_bytes());
     }
     let comp_id = 0x00930042u32 ^ xor_key;
     let count = 7u32 ^ xor_key;
