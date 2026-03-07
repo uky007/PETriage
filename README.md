@@ -1,5 +1,10 @@
 # PETriage
 
+[![Crates.io](https://img.shields.io/crates/v/petriage.svg)](https://crates.io/crates/petriage)
+[![Docs.rs](https://docs.rs/petriage/badge.svg)](https://docs.rs/petriage)
+[![License](https://img.shields.io/crates/l/petriage.svg)](https://github.com/uky007/PETriage)
+[![GitHub tag](https://img.shields.io/github/v/tag/uky007/PETriage)](https://github.com/uky007/PETriage/tags)
+
 Formerly `readpe` (renamed to avoid naming collisions with existing tools).
 
 A fast, cross-platform PE (Portable Executable) file surface analysis tool with CLI and GUI, written in Rust.
