@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::SystemTime;
 
 use goblin::pe::PE;
@@ -677,7 +677,7 @@ fn detect_anomalies(
                 rule_id: "SEC-004".into(),
                 category: "Security".into(),
                 severity: "info".into(),
-                description: "NO_SEH is set — SEH-based protections are disabled".into(),
+                description: "NO_SEH is set — binary does not use Structured Exception Handling".into(),
                 evidence: Some(format!("dll_characteristics={:#06x}", dll_chars)),
                 threshold: None,
             });
@@ -1350,6 +1350,11 @@ fn extract_strings(data: &[u8], min_len: usize) -> Vec<StringEntry> {
         return strings;
     }
 
+    // Build a set of (offset, value) from ASCII strings for O(1) dedup lookup
+    let ascii_set: HashSet<(usize, String)> = strings.iter()
+        .map(|e| (e.offset, e.value.clone()))
+        .collect();
+
     // UTF-16LE strings
     if data.len() >= 2 {
         let mut current_u16 = Vec::new();
@@ -1368,7 +1373,7 @@ fn extract_strings(data: &[u8], min_len: usize) -> Vec<StringEntry> {
                         .filter_map(|&c| char::from_u32(c as u32))
                         .collect();
                     // Only add if it doesn't duplicate an ASCII string at the same position
-                    if !strings.iter().any(|e| e.offset == start_u16 && e.value == s) {
+                    if !ascii_set.contains(&(start_u16, s.clone())) {
                         strings.push(StringEntry {
                             offset: start_u16,
                             value: s,
@@ -1388,7 +1393,7 @@ fn extract_strings(data: &[u8], min_len: usize) -> Vec<StringEntry> {
             let s: String = current_u16.iter()
                 .filter_map(|&c| char::from_u32(c as u32))
                 .collect();
-            if !strings.iter().any(|e| e.offset == start_u16 && e.value == s) {
+            if !ascii_set.contains(&(start_u16, s.clone())) {
                 strings.push(StringEntry {
                     offset: start_u16,
                     value: s,

@@ -14,7 +14,7 @@ struct Cli {
     /// PE file to analyze
     file: Option<PathBuf>,
 
-    /// Show all information (default if no flags specified)
+    /// Show all information including strings (default shows all except strings)
     #[arg(short = 'a', long)]
     all: bool,
 
@@ -125,7 +125,8 @@ fn emit_warning(warning: &str, json_mode: bool) {
     if json_mode {
         eprintln!("{}", serde_json::json!({ "warning": format!("Warning: {}", warning) }));
     } else {
-        eprintln!("Warning: {}", warning);
+        use colored::Colorize;
+        eprintln!("{}", format!("Warning: {}", warning).yellow());
     }
 }
 
@@ -146,7 +147,7 @@ fn analyze_file(
         show_sections: show_all || cli.sections,
         show_imports: show_all || cli.imports,
         show_exports: show_all || cli.exports,
-        show_strings: show_all || cli.strings,
+        show_strings: cli.all || cli.strings,
         show_hashes: show_all || cli.hashes,
         show_overlay: show_all || cli.overlay,
         show_resources: show_all || cli.resources,
@@ -220,9 +221,13 @@ fn main() {
                     }
                 }
                 Err(msg) => {
-                    if cli.ndjson {
+                    if cli.ndjson || cli.json {
                         let err = serde_json::json!({ "error": msg });
-                        ndjson_buf.push_str(&format!("{}\n", err));
+                        if cli.ndjson {
+                            ndjson_buf.push_str(&format!("{}\n", err));
+                        } else {
+                            eprintln!("{}", err);
+                        }
                     } else {
                         eprintln!("Error: {}", msg);
                     }
@@ -308,7 +313,7 @@ fn main() {
         show_sections: show_all || cli.sections,
         show_imports: show_all || cli.imports,
         show_exports: show_all || cli.exports,
-        show_strings: show_all || cli.strings,
+        show_strings: cli.all || cli.strings,
         show_hashes: show_all || cli.hashes,
         show_overlay: show_all || cli.overlay,
         show_resources: show_all || cli.resources,

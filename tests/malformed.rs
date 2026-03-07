@@ -1272,6 +1272,35 @@ fn batch_output_write_failure_exits_2() {
         "should exit 2 on write failure, got {}", output.status.code().unwrap());
 }
 
+// --- --json --batch error output format test ---
+
+#[test]
+fn batch_json_error_is_json_on_stderr() {
+    let dir = std::env::temp_dir().join(format!("petriage_batch_jsonerr_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+
+    // Write a broken PE (not parseable) with .exe extension so batch picks it up
+    std::fs::write(dir.join("broken.exe"), b"MZ\x00\x00not a real PE").unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_petriage"))
+        .args(["--json", "--batch"])
+        .arg(&dir)
+        .output()
+        .expect("failed to run petriage");
+
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    // stderr should contain JSON error, not plain text
+    for line in stderr.lines() {
+        if line.is_empty() { continue; }
+        let parsed: serde_json::Value = serde_json::from_str(line)
+            .unwrap_or_else(|_| panic!("stderr line should be valid JSON, got: {}", line));
+        assert!(parsed.get("error").is_some() || parsed.get("warning").is_some(),
+            "JSON stderr should have 'error' or 'warning' key, got: {}", line);
+    }
+}
+
 // ========================================================================
 // OPSEC-001: PDB path detection tests
 // ========================================================================

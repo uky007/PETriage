@@ -1,4 +1,4 @@
-# petriage
+# PETriage
 
 Formerly `readpe` (renamed to avoid naming collisions with existing tools).
 
@@ -84,10 +84,21 @@ cargo build --release --target x86_64-pc-windows-gnu
 
 ## Usage
 
+### Screenshots
+
+#### CUI (v0.1.0)
+
+![PETriage CUI v0.1.0](petriage_cui_v0.1.0.png)
+
+#### GUI (v0.1.0)
+
+![PETriage GUI v0.1.0](petriage_gui_v0.1.0.png)
+
 ### CLI
 
 ```
-petriage <file.exe>              # Show all information
+petriage <file.exe>              # Show all information (except strings)
+petriage <file.exe> -a           # Show all information including strings
 petriage <file.exe> -H           # Headers only
 petriage <file.exe> -i           # Imports only
 petriage <file.exe> -e           # Exports only
@@ -327,4 +338,4 @@ When `--json` or `--ndjson` is used, errors are output to stderr as JSON: `{"err
 
 ## License
 
-MIT
+MIT OR Apache-2.0
