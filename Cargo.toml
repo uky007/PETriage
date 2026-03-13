@@ -8,6 +8,7 @@ repository = "https://github.com/uky007/petriage"
 homepage = "https://github.com/uky007/petriage"
 documentation = "https://docs.rs/petriage"
 exclude = ["CLAUDE.md", "feature_scope.md", "notes/"]
+build = "build.rs"
 
 [[bin]]
 name = "petriage"
@@ -42,3 +43,6 @@ rfd = { version = "0.15", optional = true }
 image = { version = "0.25", optional = true, default-features = false, features = ["ico", "png", "bmp"] }
 ratatui = { version = "0.29", optional = true }
 crossterm = { version = "0.28", optional = true }
+
+[target.'cfg(target_os = "windows")'.build-dependencies]
+winresource = "0.1"

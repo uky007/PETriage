@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="PETriage.png" alt="PETriage" width="600">
+</p>
+
 # PETriage
 
 [![Crates.io](https://img.shields.io/crates/v/petriage.svg)](https://crates.io/crates/petriage)
