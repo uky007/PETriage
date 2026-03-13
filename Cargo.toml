@@ -1,6 +1,6 @@
 [package]
 name = "petriage"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 description = "Cross-platform PE file surface analysis tool for malware analysts"
 license = "MIT OR Apache-2.0"
