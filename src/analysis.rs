@@ -1,8 +1,10 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::LazyLock;
 use std::time::SystemTime;
 
 use goblin::pe::PE;
 use md5::Digest;
+use regex::Regex;
 use serde::Serialize;
 
 use md5::Md5;
@@ -22,6 +24,7 @@ pub struct AnalysisOptions {
     pub show_all: bool,
     pub min_str_len: usize,
     pub file_name: String,
+    pub opsec_strict: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -58,6 +61,8 @@ pub struct AnalysisResult {
     pub debug: Option<DebugInfo>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub suspicious_summary: Option<SuspiciousSummary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub opsec: Option<OpsecInfo>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub anomalies: Option<Vec<Anomaly>>,
 }
@@ -357,6 +362,31 @@ pub struct DebugEntry {
     pub age: Option<u32>,
 }
 
+#[derive(Clone, Debug, Serialize)]
+pub struct OpsecInfo {
+    pub summary: OpsecSummary,
+    pub findings: Vec<OpsecFinding>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct OpsecSummary {
+    pub finding_count: usize,
+    pub max_severity: String,
+    pub types: BTreeMap<String, usize>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct OpsecFinding {
+    pub id: String,
+    #[serde(rename = "type")]
+    pub finding_type: String,
+    pub severity: String,
+    pub source: String,
+    pub description: String,
+    pub evidence: BTreeMap<String, String>,
+    pub confidence: f32,
+}
+
 pub fn analyze(data: &[u8], pe: &PE, opts: &AnalysisOptions) -> AnalysisResult {
     let pe_type = if pe.is_64 { "PE32+ (64-bit)" } else { "PE32 (32-bit)" }.to_string();
 
@@ -402,7 +432,7 @@ pub fn analyze(data: &[u8], pe: &PE, opts: &AnalysisOptions) -> AnalysisResult {
         None
     };
 
-    let strings = if opts.show_strings {
+    let display_strings = if opts.show_strings {
         Some(extract_strings(data, opts.min_str_len))
     } else {
         None
@@ -423,11 +453,9 @@ pub fn analyze(data: &[u8], pe: &PE, opts: &AnalysisOptions) -> AnalysisResult {
         None
     };
 
-    let resources = if opts.show_resources {
-        parse_resources(data, pe)
-    } else {
-        None
-    };
+    // Always parse resources for OPSEC-004 version mismatch detection,
+    // but only include in output when show_resources.
+    let resources_parsed = parse_resources(data, pe);
 
     let authenticode = if opts.show_authenticode {
         Some(parse_authenticode(data, pe))
@@ -447,13 +475,38 @@ pub fn analyze(data: &[u8], pe: &PE, opts: &AnalysisOptions) -> AnalysisResult {
 
     let suspicious_summary = imports.as_ref().map(|imp| build_suspicious_summary(imp));
 
-    let anomalies = Some(detect_anomalies(
+    let mut anomalies_vec = detect_anomalies(
         &sections, &coff_header, &optional_header, &overlay, &suspicious_summary, &debug,
         &rich_header_parsed,
-    ));
+    );
+
+    // OPSEC detection (OPSEC-002 through OPSEC-007)
+    // When opsec_strict, always extract with min_len=6 for credential/endpoint scanning
+    // regardless of display_strings (which may use a higher min_str_len).
+    let opsec_strings = if opts.opsec_strict {
+        Some(extract_strings(data, 6))
+    } else {
+        None
+    };
+    let strings_for_opsec = opsec_strings.as_ref().or(display_strings.as_ref());
+    let (opsec_info, opsec_anomalies) = detect_opsec(
+        &file_info, &debug, &resources_parsed, &rich_header_parsed,
+        &authenticode, strings_for_opsec,
+    );
+    anomalies_vec.extend(opsec_anomalies);
 
     let rich_header = if opts.show_all { rich_header_parsed } else { None };
     let debug_output = if opts.show_all { debug } else { None };
+    let resources = if opts.show_resources { resources_parsed } else { None };
+    // Gate opsec output like debug/rich_header: only show in full output modes
+    // or when --opsec-strict explicitly requests OPSEC analysis.
+    // OPSEC anomalies are always in anomalies[] regardless.
+    let include_opsec = opts.show_all || opts.opsec_strict;
+    let opsec = if include_opsec && !opsec_info.findings.is_empty() {
+        Some(opsec_info)
+    } else {
+        None
+    };
 
     AnalysisResult {
         file_info,
@@ -463,7 +516,7 @@ pub fn analyze(data: &[u8], pe: &PE, opts: &AnalysisOptions) -> AnalysisResult {
         sections,
         imports,
         exports,
-        strings,
+        strings: display_strings,
         hashes,
         overlay,
         resources,
@@ -472,7 +525,8 @@ pub fn analyze(data: &[u8], pe: &PE, opts: &AnalysisOptions) -> AnalysisResult {
         tls,
         debug: debug_output,
         suspicious_summary,
-        anomalies,
+        opsec,
+        anomalies: Some(anomalies_vec),
     }
 }
 
@@ -780,18 +834,20 @@ fn detect_anomalies(
         }
     }
 
-    // OPSEC-001: PDB debug path found
+    // OPSEC-001: PDB debug path found (skip empty/nulled paths — handled by OPSEC-003)
     if let Some(dbg) = debug {
         for entry in &dbg.entries {
             if let Some(ref pdb) = entry.pdb_path {
-                anomalies.push(Anomaly {
-                    rule_id: "OPSEC-001".into(),
-                    category: "OPSEC".into(),
-                    severity: "info".into(),
-                    description: format!("PDB debug path found: {}", pdb),
-                    evidence: Some(pdb.clone()),
-                    threshold: None,
-                });
+                if !pdb.is_empty() {
+                    anomalies.push(Anomaly {
+                        rule_id: "OPSEC-001".into(),
+                        category: "OPSEC".into(),
+                        severity: "info".into(),
+                        description: format!("PDB debug path found: {}", pdb),
+                        evidence: Some(pdb.clone()),
+                        threshold: None,
+                    });
+                }
             }
         }
     }
@@ -828,6 +884,679 @@ fn detect_anomalies(
         }
 
     anomalies
+}
+
+// --- OPSEC detection subsystem (OPSEC-002 through OPSEC-007) ---
+
+static AWS_KEY_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\b(AKIA|ASIA)[0-9A-Z]{16}\b").unwrap()
+});
+static SLACK_TOKEN_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\b(xoxb|xoxp|xoxo|xapp|xwfp)-[A-Za-z0-9\-]{10,}").unwrap()
+});
+static GOOGLE_API_KEY_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\bAIza[0-9A-Za-z\-_]{35}\b").unwrap()
+});
+static GITHUB_TOKEN_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\b(ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{36}\b").unwrap()
+});
+static URL_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(https?|wss?)://[^\s<>"']+"#).unwrap()
+});
+static IPV4_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\b(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\b").unwrap()
+});
+
+const MAX_CREDENTIAL_FINDINGS: usize = 50;
+const MAX_ENDPOINT_FINDINGS: usize = 100;
+
+#[derive(Debug, Clone, Copy)]
+enum PdbPathClass {
+    WindowsUserProfile,
+    WindowsUncShare,
+    PosixHome,
+    Relative,
+    WindowsSystem,
+    Other,
+}
+
+impl PdbPathClass {
+    fn as_str(&self) -> &'static str {
+        match self {
+            PdbPathClass::WindowsUserProfile => "windows_user_profile",
+            PdbPathClass::WindowsUncShare => "windows_unc_share",
+            PdbPathClass::PosixHome => "posix_home",
+            PdbPathClass::Relative => "relative",
+            PdbPathClass::WindowsSystem => "windows_system",
+            PdbPathClass::Other => "other",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum IpClass {
+    Private,
+    Loopback,
+    LinkLocal,
+    Public,
+}
+
+impl IpClass {
+    fn as_str(&self) -> &'static str {
+        match self {
+            IpClass::Private => "private",
+            IpClass::Loopback => "loopback",
+            IpClass::LinkLocal => "link_local",
+            IpClass::Public => "public",
+        }
+    }
+}
+
+fn detect_opsec(
+    file_info: &Option<FileInfo>,
+    debug: &Option<DebugInfo>,
+    resources: &Option<ResourceInfo>,
+    rich_header: &Option<RichHeaderInfo>,
+    authenticode: &Option<AuthenticodeInfo>,
+    strings: Option<&Vec<StringEntry>>,
+) -> (OpsecInfo, Vec<Anomaly>) {
+    let mut findings = Vec::new();
+    let mut anomalies = Vec::new();
+
+    detect_pdb_opsec(debug, &mut findings);
+    detect_version_mismatch(file_info, resources, authenticode, &mut findings, &mut anomalies);
+    if let Some(strings) = strings {
+        detect_credentials(strings, &mut findings, &mut anomalies);
+        detect_endpoints(strings, &mut findings, &mut anomalies);
+    }
+    detect_rich_opsec(rich_header, &mut findings);
+
+    let summary = build_opsec_summary(&findings);
+    (OpsecInfo { summary, findings }, anomalies)
+}
+
+fn classify_pdb_path(path: &str) -> (PdbPathClass, Option<String>) {
+    let normalized = path.replace('/', "\\");
+
+    // Windows user profile: C:\Users\<name>\...
+    let user_prefix = ["C:\\Users\\", "D:\\Users\\", "E:\\Users\\"];
+    for prefix in &user_prefix {
+        if let Some(rest) = normalized.strip_prefix(prefix) {
+            let user = rest.split('\\').next().unwrap_or("").to_string();
+            if !user.is_empty() {
+                return (PdbPathClass::WindowsUserProfile, Some(user));
+            }
+        }
+    }
+
+    if normalized.starts_with("\\\\") {
+        return (PdbPathClass::WindowsUncShare, None);
+    }
+
+    if path.starts_with("/home/") {
+        let user = path.trim_start_matches("/home/")
+            .split('/').next().unwrap_or("").to_string();
+        if !user.is_empty() {
+            return (PdbPathClass::PosixHome, Some(user));
+        }
+    }
+
+    if path.starts_with(".\\") || path.starts_with("./")
+        || path.starts_with("..\\") || path.starts_with("../") {
+        return (PdbPathClass::Relative, None);
+    }
+
+    if normalized.starts_with("C:\\Windows\\") || normalized.starts_with("C:\\Program Files") {
+        return (PdbPathClass::WindowsSystem, None);
+    }
+
+    (PdbPathClass::Other, None)
+}
+
+fn detect_pdb_opsec(
+    debug: &Option<DebugInfo>,
+    findings: &mut Vec<OpsecFinding>,
+) {
+    let dbg = match debug {
+        Some(d) => d,
+        None => return,
+    };
+
+    for entry in &dbg.entries {
+        // Only consider CodeView entries (type 2) with confirmed RSDS (guid present)
+        if entry.debug_type_raw == 2 && entry.guid.is_some() {
+            match entry.pdb_path.as_deref() {
+                None | Some("") => {
+                    // OPSEC-003: Nulled/empty CodeView PDB path
+                    let mut evidence = BTreeMap::new();
+                    if let Some(ref guid) = entry.guid {
+                        evidence.insert("guid".into(), guid.clone());
+                    }
+                    if let Some(age) = entry.age {
+                        evidence.insert("age".into(), age.to_string());
+                    }
+                    findings.push(OpsecFinding {
+                        id: "OPSEC-003".into(),
+                        finding_type: "nulled_pdb".into(),
+                        severity: "warning".into(),
+                        source: "debug_directory".into(),
+                        description: "CodeView RSDS structure present but PDB path is empty/nulled — possible deliberate OPSEC countermeasure".into(),
+                        evidence,
+                        confidence: 0.8,
+                    });
+                }
+                Some(pdb) => {
+                    // OPSEC-002: PDB path classification
+                    let (path_class, username) = classify_pdb_path(pdb);
+                    let mut evidence = BTreeMap::new();
+                    evidence.insert("pdb_path".into(), pdb.to_string());
+                    evidence.insert("path_class".into(), path_class.as_str().into());
+                    if let Some(ref user) = username {
+                        evidence.insert("username_hint".into(), user.clone());
+                    }
+                    findings.push(OpsecFinding {
+                        id: "OPSEC-002".into(),
+                        finding_type: "pdb_path".into(),
+                        severity: "info".into(),
+                        source: "debug_directory".into(),
+                        description: format!("PDB path classified as {}: {}", path_class.as_str(), pdb),
+                        evidence,
+                        confidence: 0.9,
+                    });
+                    // Note: OPSEC-001 anomaly is already emitted by detect_anomalies
+                }
+            }
+        }
+    }
+}
+
+fn strip_pe_ext(s: &str) -> &str {
+    s.strip_suffix(".exe")
+        .or_else(|| s.strip_suffix(".dll"))
+        .or_else(|| s.strip_suffix(".sys"))
+        .or_else(|| s.strip_suffix(".ocx"))
+        .or_else(|| s.strip_suffix(".scr"))
+        .unwrap_or(s)
+}
+
+fn mismatch_score(on_disk: &str, meta: &str) -> u8 {
+    if on_disk == meta { return 0; }
+    if strip_pe_ext(on_disk) == strip_pe_ext(meta) { return 1; }
+    2
+}
+
+fn detect_version_mismatch(
+    file_info: &Option<FileInfo>,
+    resources: &Option<ResourceInfo>,
+    authenticode: &Option<AuthenticodeInfo>,
+    findings: &mut Vec<OpsecFinding>,
+    anomalies: &mut Vec<Anomaly>,
+) {
+    let info = match file_info {
+        Some(i) => i,
+        None => return,
+    };
+    let res = match resources {
+        Some(r) => r,
+        None => return,
+    };
+    let ver = match &res.version_info {
+        Some(v) => v,
+        None => return,
+    };
+
+    let on_disk = std::path::Path::new(&info.name)
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
+
+    if on_disk.is_empty() {
+        return;
+    }
+    let on_disk_lower = on_disk.to_ascii_lowercase();
+
+    // Check OriginalFilename
+    let original_filename = ver.string_info.iter()
+        .find(|kv| kv.key.eq_ignore_ascii_case("OriginalFilename"))
+        .map(|kv| kv.value.trim().to_string());
+
+    if let Some(ref orig) = original_filename {
+        if !orig.is_empty() {
+            let orig_lower = orig.to_ascii_lowercase();
+            let score = mismatch_score(&on_disk_lower, &orig_lower);
+            if score >= 2 {
+                let mut evidence = BTreeMap::new();
+                evidence.insert("on_disk_name".into(), on_disk.clone());
+                evidence.insert("original_filename".into(), orig.clone());
+                evidence.insert("mismatch_level".into(), "strong".into());
+                findings.push(OpsecFinding {
+                    id: "OPSEC-004".into(),
+                    finding_type: "version_mismatch".into(),
+                    severity: "warning".into(),
+                    source: "version_info".into(),
+                    description: format!(
+                        "Filename mismatch: on-disk '{}' vs OriginalFilename '{}' — possible masquerading",
+                        on_disk, orig
+                    ),
+                    evidence,
+                    confidence: 0.85,
+                });
+                anomalies.push(Anomaly {
+                    rule_id: "OPSEC-004".into(),
+                    category: "OPSEC".into(),
+                    severity: "warning".into(),
+                    description: format!(
+                        "Filename mismatch: on-disk '{}' vs OriginalFilename '{}' — possible masquerading",
+                        on_disk, orig
+                    ),
+                    evidence: Some(format!("on_disk={}, original_filename={}", on_disk, orig)),
+                    threshold: None,
+                });
+            } else if score == 1 {
+                let mut evidence = BTreeMap::new();
+                evidence.insert("on_disk_name".into(), on_disk.clone());
+                evidence.insert("original_filename".into(), orig.clone());
+                evidence.insert("mismatch_level".into(), "weak".into());
+                findings.push(OpsecFinding {
+                    id: "OPSEC-004".into(),
+                    finding_type: "version_mismatch".into(),
+                    severity: "info".into(),
+                    source: "version_info".into(),
+                    description: format!(
+                        "Minor filename difference: on-disk '{}' vs OriginalFilename '{}'",
+                        on_disk, orig
+                    ),
+                    evidence,
+                    confidence: 0.5,
+                });
+            }
+        }
+    }
+
+    // Vendor masquerading: claims known vendor but not properly signed.
+    // Only check when authenticode was actually evaluated (not None) to avoid
+    // false positives in limited display modes where authenticode is not parsed.
+    // Distinguish three states:
+    //   signed=false             → unsigned (high confidence masquerading)
+    //   signed=true, parse_ok=false → signature present but unparseable (lower confidence)
+    //   signed=true, parse_ok=true  → properly signed (no finding)
+    if let Some(auth) = authenticode {
+        let company_name = ver.string_info.iter()
+            .find(|kv| kv.key.eq_ignore_ascii_case("CompanyName"))
+            .map(|kv| kv.value.trim().to_string());
+
+        if let Some(ref company) = company_name {
+            let known_vendors = ["Microsoft", "Google", "Adobe", "Apple", "Mozilla", "Oracle"];
+            let claims_vendor = known_vendors.iter().any(|v| {
+                company.to_ascii_lowercase().contains(&v.to_ascii_lowercase())
+            });
+            if claims_vendor && !auth.signed {
+                let mut evidence = BTreeMap::new();
+                evidence.insert("company_name".into(), company.clone());
+                evidence.insert("signed".into(), "false".into());
+                findings.push(OpsecFinding {
+                    id: "OPSEC-004".into(),
+                    finding_type: "vendor_mismatch".into(),
+                    severity: "warning".into(),
+                    source: "version_info".into(),
+                    description: format!(
+                        "Claims vendor '{}' but binary is not signed — possible masquerading",
+                        company
+                    ),
+                    evidence,
+                    confidence: 0.8,
+                });
+                anomalies.push(Anomaly {
+                    rule_id: "OPSEC-004".into(),
+                    category: "OPSEC".into(),
+                    severity: "warning".into(),
+                    description: format!("Claims vendor '{}' but binary is not signed", company),
+                    evidence: Some(format!("company_name={}", company)),
+                    threshold: None,
+                });
+            } else if claims_vendor && auth.signed && !auth.parse_ok {
+                let mut evidence = BTreeMap::new();
+                evidence.insert("company_name".into(), company.clone());
+                evidence.insert("signed".into(), "true".into());
+                evidence.insert("parse_ok".into(), "false".into());
+                findings.push(OpsecFinding {
+                    id: "OPSEC-004".into(),
+                    finding_type: "vendor_mismatch".into(),
+                    severity: "info".into(),
+                    source: "version_info".into(),
+                    description: format!(
+                        "Claims vendor '{}' — signature present but could not be verified",
+                        company
+                    ),
+                    evidence,
+                    confidence: 0.4,
+                });
+            }
+        }
+    }
+}
+
+fn detect_credentials(
+    strings: &[StringEntry],
+    findings: &mut Vec<OpsecFinding>,
+    anomalies: &mut Vec<Anomaly>,
+) {
+    let mut count = 0;
+
+    for s in strings {
+        if count >= MAX_CREDENTIAL_FINDINGS { break; }
+
+        // AWS Access Key ID
+        if let Some(m) = AWS_KEY_RE.find(&s.value) {
+            let prefix = &m.as_str()[..4];
+            let mut evidence = BTreeMap::new();
+            evidence.insert("pattern".into(), "aws_access_key_id".into());
+            evidence.insert("offset".into(), format!("{:#x}", s.offset));
+            evidence.insert("prefix".into(), prefix.to_string());
+            findings.push(OpsecFinding {
+                id: "OPSEC-005".into(),
+                finding_type: "credential".into(),
+                severity: "critical".into(),
+                source: "strings".into(),
+                description: format!("Possible AWS access key ID at offset {:#x}", s.offset),
+                evidence,
+                confidence: 0.95,
+            });
+            anomalies.push(Anomaly {
+                rule_id: "OPSEC-005".into(),
+                category: "OPSEC".into(),
+                severity: "critical".into(),
+                description: format!("Possible AWS access key ID at offset {:#x}", s.offset),
+                evidence: Some(format!("prefix={}", prefix)),
+                threshold: None,
+            });
+            count += 1;
+            continue;
+        }
+
+        // Slack token
+        if let Some(m) = SLACK_TOKEN_RE.find(&s.value) {
+            let prefix = m.as_str().split('-').next().unwrap_or("");
+            let mut evidence = BTreeMap::new();
+            evidence.insert("pattern".into(), "slack_token".into());
+            evidence.insert("offset".into(), format!("{:#x}", s.offset));
+            evidence.insert("prefix".into(), prefix.to_string());
+            findings.push(OpsecFinding {
+                id: "OPSEC-005".into(),
+                finding_type: "credential".into(),
+                severity: "critical".into(),
+                source: "strings".into(),
+                description: format!("Possible Slack token ({}) at offset {:#x}", prefix, s.offset),
+                evidence,
+                confidence: 0.9,
+            });
+            anomalies.push(Anomaly {
+                rule_id: "OPSEC-005".into(),
+                category: "OPSEC".into(),
+                severity: "critical".into(),
+                description: format!("Possible Slack token ({}) at offset {:#x}", prefix, s.offset),
+                evidence: Some(format!("prefix={}", prefix)),
+                threshold: None,
+            });
+            count += 1;
+            continue;
+        }
+
+        // Google API key
+        if GOOGLE_API_KEY_RE.is_match(&s.value) {
+            let mut evidence = BTreeMap::new();
+            evidence.insert("pattern".into(), "google_api_key".into());
+            evidence.insert("offset".into(), format!("{:#x}", s.offset));
+            findings.push(OpsecFinding {
+                id: "OPSEC-005".into(),
+                finding_type: "credential".into(),
+                severity: "critical".into(),
+                source: "strings".into(),
+                description: format!("Possible Google API key at offset {:#x}", s.offset),
+                evidence,
+                confidence: 0.85,
+            });
+            anomalies.push(Anomaly {
+                rule_id: "OPSEC-005".into(),
+                category: "OPSEC".into(),
+                severity: "critical".into(),
+                description: format!("Possible Google API key at offset {:#x}", s.offset),
+                evidence: Some("prefix=AIza".into()),
+                threshold: None,
+            });
+            count += 1;
+            continue;
+        }
+
+        // GitHub token
+        if let Some(m) = GITHUB_TOKEN_RE.find(&s.value) {
+            let prefix = m.as_str().split('_').next().unwrap_or("");
+            let mut evidence = BTreeMap::new();
+            evidence.insert("pattern".into(), "github_token".into());
+            evidence.insert("offset".into(), format!("{:#x}", s.offset));
+            evidence.insert("prefix".into(), prefix.to_string());
+            findings.push(OpsecFinding {
+                id: "OPSEC-005".into(),
+                finding_type: "credential".into(),
+                severity: "critical".into(),
+                source: "strings".into(),
+                description: format!("Possible GitHub token ({}) at offset {:#x}", prefix, s.offset),
+                evidence,
+                confidence: 0.9,
+            });
+            anomalies.push(Anomaly {
+                rule_id: "OPSEC-005".into(),
+                category: "OPSEC".into(),
+                severity: "critical".into(),
+                description: format!("Possible GitHub token ({}) at offset {:#x}", prefix, s.offset),
+                evidence: Some(format!("prefix={}", prefix)),
+                threshold: None,
+            });
+            count += 1;
+        }
+    }
+}
+
+fn classify_ipv4(octets: &[u8; 4]) -> IpClass {
+    match octets {
+        [10, ..] => IpClass::Private,
+        [172, b, ..] if (16..=31).contains(b) => IpClass::Private,
+        [192, 168, ..] => IpClass::Private,
+        [127, ..] => IpClass::Loopback,
+        [169, 254, ..] => IpClass::LinkLocal,
+        _ => IpClass::Public,
+    }
+}
+
+fn parse_ipv4(s: &str) -> Option<[u8; 4]> {
+    let parts: Vec<&str> = s.split('.').collect();
+    if parts.len() != 4 { return None; }
+    let mut octets = [0u8; 4];
+    for (i, part) in parts.iter().enumerate() {
+        octets[i] = part.parse().ok()?;
+    }
+    if octets[0] == 0 { return None; }
+    Some(octets)
+}
+
+fn detect_endpoints(
+    strings: &[StringEntry],
+    findings: &mut Vec<OpsecFinding>,
+    anomalies: &mut Vec<Anomaly>,
+) {
+    let mut count = 0;
+    let mut seen_urls: HashSet<String> = HashSet::new();
+    let mut seen_ips: HashSet<String> = HashSet::new();
+
+    for s in strings {
+        if count >= MAX_ENDPOINT_FINDINGS { break; }
+
+        // URL detection
+        for m in URL_RE.find_iter(&s.value) {
+            if count >= MAX_ENDPOINT_FINDINGS { break; }
+            let url = m.as_str();
+            if !seen_urls.insert(url.to_string()) { continue; }
+
+            let is_internal = url.contains("localhost")
+                || url.contains("127.0.0.1")
+                || url.contains(".local")
+                || url.contains(".internal")
+                || url.contains(".lan");
+
+            let severity = if is_internal { "warning" } else { "info" };
+            let mut evidence = BTreeMap::new();
+            evidence.insert("url".into(), url.to_string());
+            evidence.insert("offset".into(), format!("{:#x}", s.offset));
+            evidence.insert("class".into(), if is_internal { "internal" } else { "external" }.into());
+
+            findings.push(OpsecFinding {
+                id: "OPSEC-006".into(),
+                finding_type: "endpoint".into(),
+                severity: severity.into(),
+                source: "strings".into(),
+                description: format!("Hardcoded {} URL: {}", if is_internal { "internal" } else { "external" }, url),
+                evidence,
+                confidence: 0.8,
+            });
+
+            if is_internal {
+                anomalies.push(Anomaly {
+                    rule_id: "OPSEC-006".into(),
+                    category: "OPSEC".into(),
+                    severity: "warning".into(),
+                    description: format!("Internal/local URL found: {}", url),
+                    evidence: Some(url.to_string()),
+                    threshold: None,
+                });
+            }
+            count += 1;
+        }
+
+        // Private/reserved IP detection
+        for cap in IPV4_RE.captures_iter(&s.value) {
+            if count >= MAX_ENDPOINT_FINDINGS { break; }
+            let ip_str = cap.get(1).unwrap().as_str();
+            if !seen_ips.insert(ip_str.to_string()) { continue; }
+
+            if let Some(octets) = parse_ipv4(ip_str) {
+                let class = classify_ipv4(&octets);
+                if class == IpClass::Public { continue; }
+
+                let severity = if class == IpClass::Private { "warning" } else { "info" };
+                let mut evidence = BTreeMap::new();
+                evidence.insert("ip".into(), ip_str.to_string());
+                evidence.insert("offset".into(), format!("{:#x}", s.offset));
+                evidence.insert("class".into(), class.as_str().into());
+
+                findings.push(OpsecFinding {
+                    id: "OPSEC-006".into(),
+                    finding_type: "endpoint".into(),
+                    severity: severity.into(),
+                    source: "strings".into(),
+                    description: format!("Hardcoded {} IP address: {}", class.as_str(), ip_str),
+                    evidence,
+                    confidence: 0.7,
+                });
+
+                if class == IpClass::Private {
+                    anomalies.push(Anomaly {
+                        rule_id: "OPSEC-006".into(),
+                        category: "OPSEC".into(),
+                        severity: "warning".into(),
+                        description: format!("Private IP address found: {}", ip_str),
+                        evidence: Some(ip_str.to_string()),
+                        threshold: None,
+                    });
+                }
+                count += 1;
+            }
+        }
+    }
+}
+
+fn detect_rich_opsec(
+    rich_header: &Option<RichHeaderInfo>,
+    findings: &mut Vec<OpsecFinding>,
+) {
+    let rich = match rich_header {
+        Some(r) => r,
+        None => return,
+    };
+
+    // OPSEC-007: Rich Header checksum invalid as OPSEC surface
+    if !rich.checksum_valid {
+        let mut evidence = BTreeMap::new();
+        evidence.insert("xor_key".into(), rich.xor_key.clone());
+        evidence.insert("checksum_valid".into(), "false".into());
+        findings.push(OpsecFinding {
+            id: "OPSEC-007".into(),
+            finding_type: "rich_header".into(),
+            severity: "warning".into(),
+            source: "rich_header".into(),
+            description: "Rich Header checksum invalid — build fingerprint may be tampered for OPSEC/attribution purposes".into(),
+            evidence,
+            confidence: 0.8,
+        });
+        // Note: RICH-001 anomaly is already emitted by detect_anomalies
+    }
+
+    // Wide toolset version range check
+    if !rich.entries.is_empty() {
+        let active: Vec<_> = rich.entries.iter().filter(|e| e.count > 0).collect();
+        if let (Some(oldest), Some(newest)) = (
+            active.iter().min_by_key(|e| e.build_id),
+            active.iter().max_by_key(|e| e.build_id),
+        ) {
+            if oldest.build_id < 7000 && newest.build_id > 25000 {
+                let mut evidence = BTreeMap::new();
+                evidence.insert("oldest_build_id".into(), oldest.build_id.to_string());
+                evidence.insert("newest_build_id".into(), newest.build_id.to_string());
+                if let Some(ref desc) = oldest.description {
+                    evidence.insert("oldest_tool".into(), desc.clone());
+                }
+                if let Some(ref desc) = newest.description {
+                    evidence.insert("newest_tool".into(), desc.clone());
+                }
+                findings.push(OpsecFinding {
+                    id: "OPSEC-007".into(),
+                    finding_type: "rich_header".into(),
+                    severity: "info".into(),
+                    source: "rich_header".into(),
+                    description: "Rich Header shows very wide toolset version range — may indicate build environment mixing or tampering".into(),
+                    evidence,
+                    confidence: 0.5,
+                });
+            }
+        }
+    }
+}
+
+fn build_opsec_summary(findings: &[OpsecFinding]) -> OpsecSummary {
+    let mut types = BTreeMap::new();
+    let mut max_rank = 0u8;
+
+    for f in findings {
+        *types.entry(f.finding_type.clone()).or_insert(0) += 1;
+        let rank = match f.severity.as_str() {
+            "critical" => 3,
+            "warning" => 2,
+            "info" => 1,
+            _ => 0,
+        };
+        if rank > max_rank { max_rank = rank; }
+    }
+
+    OpsecSummary {
+        finding_count: findings.len(),
+        max_severity: match max_rank {
+            3 => "critical",
+            2 => "warning",
+            1 => "info",
+            _ => "none",
+        }.into(),
+        types,
+    }
 }
 
 fn parse_dos_header(data: &[u8]) -> DosHeader {

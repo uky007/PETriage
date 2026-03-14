@@ -1,6 +1,6 @@
 [package]
 name = "petriage"
-version = "0.2.2"
+version = "0.3.0"
 edition = "2024"
 description = "Cross-platform PE file surface analysis tool for malware analysts"
 license = "MIT OR Apache-2.0"
@@ -36,6 +36,7 @@ x509-cert = "0.2"
 der = { version = "0.7", features = ["derive"] }
 const-oid = "0.9"
 colored = "3"
+regex = "1"
 eframe = { version = "0.31", optional = true }
 egui = { version = "0.31", optional = true }
 egui_extras = { version = "0.31", optional = true, features = ["syntect"] }

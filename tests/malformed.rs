@@ -1416,18 +1416,22 @@ fn hashes_only_excludes_debug_and_opsec_section() {
         .expect("stdout should be valid JSON");
     assert!(val.get("debug").is_none(),
         "debug field should be absent with --hashes, got: {}", stdout);
+    assert!(val.get("opsec").is_none(),
+        "opsec field should be absent with --hashes, got: {}", stdout);
 }
 
 #[test]
 fn hashes_only_text_excludes_opsec_header() {
-    // Text output with --hashes should NOT contain the OPSEC: PDB Path section
+    // Text output with --hashes should NOT contain any OPSEC section
     let pdb = r"C:\Users\dev\build\test.pdb";
     let data = build_pe_with_pdb_path(pdb);
     let output = petriage_run_with_args(&data, &["--hashes"]);
     assert_eq!(output.status.code(), Some(0));
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(!stdout.contains("OPSEC: PDB Path"),
-        "text output with --hashes should not contain OPSEC section, got:\n{}", stdout);
+        "text output with --hashes should not contain OPSEC: PDB Path section, got:\n{}", stdout);
+    assert!(!stdout.contains("OPSEC Analysis"),
+        "text output with --hashes should not contain OPSEC Analysis section, got:\n{}", stdout);
     assert!(stdout.contains("Hashes"),
         "text output with --hashes should contain Hashes section");
 }
@@ -1619,4 +1623,568 @@ fn rich_002_fires_for_pe_without_rich_header() {
         assert!(anomalies.iter().any(|a| a["rule_id"] == "RICH-002"),
             "RICH-002 should fire for PE without Rich Header, anomalies: {:?}", anomalies);
     }
+}
+
+// ========================================================================
+// OPSEC-002: PDB path classification tests
+// ========================================================================
+
+#[test]
+fn opsec_002_pdb_path_classification() {
+    let pdb = r"C:\Users\attacker\repos\malware\Release\payload.pdb";
+    let data = build_pe_with_pdb_path(pdb);
+    let output = petriage_run_with_args(&data, &["--json"]);
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let val: serde_json::Value = serde_json::from_str(&stdout)
+        .expect("stdout should be valid JSON");
+    let opsec = val.get("opsec").expect("should have opsec section");
+    let findings = opsec["findings"].as_array().expect("findings should be array");
+    let pdb_finding = findings.iter()
+        .find(|f| f["id"] == "OPSEC-002")
+        .expect("OPSEC-002 finding should be present");
+    assert_eq!(pdb_finding["type"], "pdb_path");
+    assert_eq!(pdb_finding["severity"], "info");
+    let evidence = &pdb_finding["evidence"];
+    assert_eq!(evidence["path_class"], "windows_user_profile");
+    assert_eq!(evidence["username_hint"], "attacker");
+}
+
+#[test]
+fn opsec_002_posix_path() {
+    let pdb = "/home/dev/project/build/test.pdb";
+    let data = build_pe_with_pdb_path(pdb);
+    let output = petriage_run_with_args(&data, &["--json"]);
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let val: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let findings = val["opsec"]["findings"].as_array().unwrap();
+    let f = findings.iter().find(|f| f["id"] == "OPSEC-002").unwrap();
+    assert_eq!(f["evidence"]["path_class"], "posix_home");
+    assert_eq!(f["evidence"]["username_hint"], "dev");
+}
+
+// ========================================================================
+// OPSEC-003: Nulled CodeView PDB path tests
+// ========================================================================
+
+#[test]
+fn opsec_003_nulled_pdb_path() {
+    // Build a PE with CodeView RSDS but empty/nulled PDB path
+    let data = build_pe_with_pdb_path("");
+    let output = petriage_run_with_args(&data, &["--json"]);
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let val: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let opsec = val.get("opsec").expect("should have opsec section");
+    let findings = opsec["findings"].as_array().unwrap();
+    let nulled = findings.iter()
+        .find(|f| f["id"] == "OPSEC-003")
+        .expect("OPSEC-003 should fire for nulled PDB path");
+    assert_eq!(nulled["type"], "nulled_pdb");
+    assert_eq!(nulled["severity"], "warning");
+}
+
+// ========================================================================
+// OPSEC-005: Credential pattern tests
+// ========================================================================
+
+/// Build a PE with strings embedded in a section
+fn build_pe_with_strings(strings: &[&str]) -> Vec<u8> {
+    let mut data = vec![0u8; 0x1000];
+
+    // DOS header
+    data[0] = b'M'; data[1] = b'Z';
+    data[0x3C..0x40].copy_from_slice(&0x80u32.to_le_bytes());
+
+    // PE signature at 0x80
+    data[0x80] = b'P'; data[0x81] = b'E';
+
+    // COFF header at 0x84
+    data[0x84..0x86].copy_from_slice(&0x014Cu16.to_le_bytes()); // i386
+    data[0x86..0x88].copy_from_slice(&1u16.to_le_bytes());      // 1 section
+    data[0x94..0x96].copy_from_slice(&0xE0u16.to_le_bytes());   // SizeOfOptionalHeader
+    data[0x96..0x98].copy_from_slice(&0x0102u16.to_le_bytes()); // Characteristics
+
+    // Optional header at 0x98
+    data[0x98..0x9A].copy_from_slice(&0x010Bu16.to_le_bytes()); // PE32 magic
+    data[0xB4..0xB8].copy_from_slice(&0x400000u32.to_le_bytes()); // ImageBase
+    data[0xB8..0xBC].copy_from_slice(&0x1000u32.to_le_bytes()); // SectionAlignment
+    data[0xBC..0xC0].copy_from_slice(&0x200u32.to_le_bytes());  // FileAlignment
+    data[0xD0..0xD4].copy_from_slice(&0x3000u32.to_le_bytes()); // SizeOfImage
+    data[0xD4..0xD8].copy_from_slice(&0x200u32.to_le_bytes());  // SizeOfHeaders
+    data[0xF4..0xF8].copy_from_slice(&16u32.to_le_bytes());     // NumberOfRvaAndSizes
+
+    // Section header at 0x178
+    let sh = 0x178;
+    data[sh..sh + 6].copy_from_slice(b".data\0");
+    data[sh + 8..sh + 12].copy_from_slice(&0x800u32.to_le_bytes());  // VirtualSize
+    data[sh + 12..sh + 16].copy_from_slice(&0x1000u32.to_le_bytes()); // VirtualAddress
+    data[sh + 16..sh + 20].copy_from_slice(&0x800u32.to_le_bytes());  // SizeOfRawData
+    data[sh + 20..sh + 24].copy_from_slice(&0x200u32.to_le_bytes());  // PointerToRawData
+    data[sh + 36..sh + 40].copy_from_slice(&0xC0000040u32.to_le_bytes()); // READ|WRITE|INITIALIZED
+
+    // Embed strings at file offset 0x200
+    let mut offset = 0x200;
+    for s in strings {
+        let bytes = s.as_bytes();
+        if offset + bytes.len() + 1 < data.len() {
+            data[offset..offset + bytes.len()].copy_from_slice(bytes);
+            offset += bytes.len() + 1; // null separator
+        }
+    }
+
+    data
+}
+
+#[test]
+fn opsec_005_aws_key_detection() {
+    let data = build_pe_with_strings(&[
+        "AKIAIOSFODNN7EXAMPLE",
+        "some normal string here",
+    ]);
+    let output = petriage_run_with_args(&data, &["--json", "-a", "--opsec-strict"]);
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let val: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let opsec = val.get("opsec").expect("should have opsec section");
+    let findings = opsec["findings"].as_array().unwrap();
+    let cred = findings.iter().find(|f| f["id"] == "OPSEC-005");
+    assert!(cred.is_some(), "OPSEC-005 should fire for AWS key, findings: {:?}", findings);
+    let cred = cred.unwrap();
+    assert_eq!(cred["severity"], "critical");
+    assert_eq!(cred["evidence"]["pattern"], "aws_access_key_id");
+}
+
+#[test]
+fn opsec_005_slack_token_detection() {
+    let data = build_pe_with_strings(&[
+        "xoxb-1234567890-abcdefghij",
+    ]);
+    let output = petriage_run_with_args(&data, &["--json", "-a", "--opsec-strict"]);
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let val: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let findings = val["opsec"]["findings"].as_array().unwrap();
+    let cred = findings.iter().find(|f|
+        f["id"] == "OPSEC-005" && f["evidence"]["pattern"] == "slack_token");
+    assert!(cred.is_some(), "OPSEC-005 should fire for Slack token");
+}
+
+#[test]
+fn opsec_005_github_token_detection() {
+    let data = build_pe_with_strings(&[
+        "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij",
+    ]);
+    let output = petriage_run_with_args(&data, &["--json", "-a", "--opsec-strict"]);
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let val: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let findings = val["opsec"]["findings"].as_array().unwrap();
+    let cred = findings.iter().find(|f|
+        f["id"] == "OPSEC-005" && f["evidence"]["pattern"] == "github_token");
+    assert!(cred.is_some(), "OPSEC-005 should fire for GitHub token");
+}
+
+// ========================================================================
+// OPSEC-006: Endpoint detection tests
+// ========================================================================
+
+#[test]
+fn opsec_006_internal_url_detection() {
+    let data = build_pe_with_strings(&[
+        "http://localhost:8080/api/callback",
+        "some padding string here",
+    ]);
+    let output = petriage_run_with_args(&data, &["--json", "-a", "--opsec-strict"]);
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let val: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let opsec = val.get("opsec").expect("should have opsec section");
+    let findings = opsec["findings"].as_array().unwrap();
+    let endpoint = findings.iter().find(|f|
+        f["id"] == "OPSEC-006" && f["evidence"]["class"] == "internal");
+    assert!(endpoint.is_some(), "OPSEC-006 should fire for localhost URL");
+    assert_eq!(endpoint.unwrap()["severity"], "warning");
+}
+
+#[test]
+fn opsec_006_private_ip_detection() {
+    let data = build_pe_with_strings(&[
+        "connect to 192.168.1.100 for updates",
+    ]);
+    let output = petriage_run_with_args(&data, &["--json", "-a", "--opsec-strict"]);
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let val: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let findings = val["opsec"]["findings"].as_array().unwrap();
+    let ip = findings.iter().find(|f|
+        f["id"] == "OPSEC-006" && f["evidence"].get("ip").is_some());
+    assert!(ip.is_some(), "OPSEC-006 should fire for private IP, findings: {:?}", findings);
+    assert_eq!(ip.unwrap()["evidence"]["class"], "private");
+}
+
+// ========================================================================
+// OPSEC summary and JSON schema tests
+// ========================================================================
+
+#[test]
+fn opsec_json_schema_structure() {
+    let pdb = r"C:\Users\dev\repos\project\test.pdb";
+    let data = build_pe_with_pdb_path(pdb);
+    let output = petriage_run_with_args(&data, &["--json"]);
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let val: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let opsec = val.get("opsec").expect("should have opsec section");
+
+    // Verify summary structure
+    let summary = &opsec["summary"];
+    assert!(summary["finding_count"].as_u64().unwrap() > 0);
+    assert!(summary["max_severity"].is_string());
+    assert!(summary["types"].is_object());
+
+    // Verify finding structure
+    let findings = opsec["findings"].as_array().unwrap();
+    for f in findings {
+        assert!(f["id"].is_string(), "finding missing id");
+        assert!(f["type"].is_string(), "finding missing type");
+        assert!(f["severity"].is_string(), "finding missing severity");
+        assert!(f["source"].is_string(), "finding missing source");
+        assert!(f["description"].is_string(), "finding missing description");
+        assert!(f["evidence"].is_object(), "finding missing evidence");
+        assert!(f["confidence"].is_f64(), "finding missing confidence");
+    }
+}
+
+#[test]
+fn opsec_strict_extracts_strings_for_scanning() {
+    // Without -a/-S, --opsec-strict should still scan strings for credentials
+    let data = build_pe_with_strings(&[
+        "AKIAIOSFODNN7EXAMPLE",
+    ]);
+    let output = petriage_run_with_args(&data, &["--json", "--opsec-strict"]);
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let val: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    // strings section should NOT be in output (not requested with -a/-S)
+    assert!(val.get("strings").is_none(), "strings should not be in output without -a/-S");
+    // but OPSEC should detect the credential
+    let opsec = val.get("opsec").expect("should have opsec section with --opsec-strict");
+    let findings = opsec["findings"].as_array().unwrap();
+    assert!(findings.iter().any(|f| f["id"] == "OPSEC-005"),
+        "OPSEC-005 should fire with --opsec-strict even without -a");
+}
+
+// ========================================================================
+// Regression tests for review findings
+// ========================================================================
+
+#[test]
+fn opsec_001_does_not_fire_on_empty_pdb_path() {
+    // OPSEC-001 should not emit "PDB debug path found: " for nulled PDB paths.
+    // OPSEC-003 handles those instead.
+    let data = build_pe_with_pdb_path("");
+    let output = petriage_run_with_args(&data, &["--json"]);
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let val: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let anomalies = val["anomalies"].as_array().unwrap();
+    let opsec_001 = anomalies.iter()
+        .find(|a| a["rule_id"] == "OPSEC-001");
+    assert!(opsec_001.is_none(),
+        "OPSEC-001 should not fire for empty PDB path, anomalies: {:?}", anomalies);
+    // OPSEC-003 should fire instead (via opsec.findings)
+    let findings = val["opsec"]["findings"].as_array().unwrap();
+    assert!(findings.iter().any(|f| f["id"] == "OPSEC-003"),
+        "OPSEC-003 should fire for empty PDB path");
+}
+
+/// Encode string as null-terminated UTF-16LE bytes
+fn encode_utf16le(s: &str) -> Vec<u8> {
+    let mut out = Vec::new();
+    for c in s.encode_utf16() {
+        out.extend_from_slice(&c.to_le_bytes());
+    }
+    out.extend_from_slice(&0u16.to_le_bytes());
+    out
+}
+
+fn pad_to_dword(buf: &mut Vec<u8>) {
+    while buf.len() % 4 != 0 {
+        buf.push(0);
+    }
+}
+
+/// Build a VS_VERSIONINFO version string entry (key=value pair)
+fn build_ver_string(key: &str, value: &str) -> Vec<u8> {
+    let key_bytes = encode_utf16le(key);
+    let value_bytes = encode_utf16le(value);
+    let value_wchars = value.len() + 1; // including null
+    let mut buf = Vec::new();
+    buf.extend_from_slice(&0u16.to_le_bytes()); // placeholder wLength
+    buf.extend_from_slice(&(value_wchars as u16).to_le_bytes());
+    buf.extend_from_slice(&1u16.to_le_bytes()); // wType = text
+    buf.extend_from_slice(&key_bytes);
+    pad_to_dword(&mut buf);
+    buf.extend_from_slice(&value_bytes);
+    pad_to_dword(&mut buf);
+    let len = buf.len() as u16;
+    buf[0..2].copy_from_slice(&len.to_le_bytes());
+    buf
+}
+
+/// Build a complete VS_VERSIONINFO resource with given string entries
+fn build_vs_versioninfo(strings: &[(&str, &str)]) -> Vec<u8> {
+    // StringTable children
+    let mut table_children = Vec::new();
+    for (k, v) in strings {
+        table_children.extend_from_slice(&build_ver_string(k, v));
+    }
+
+    // StringTable: key="040904b0"
+    let table_key = encode_utf16le("040904b0");
+    let mut table = Vec::new();
+    table.extend_from_slice(&0u16.to_le_bytes()); // placeholder wLength
+    table.extend_from_slice(&0u16.to_le_bytes()); // wValueLength = 0
+    table.extend_from_slice(&1u16.to_le_bytes()); // wType = text
+    table.extend_from_slice(&table_key);
+    pad_to_dword(&mut table);
+    table.extend_from_slice(&table_children);
+    pad_to_dword(&mut table);
+    let tlen = table.len() as u16;
+    table[0..2].copy_from_slice(&tlen.to_le_bytes());
+
+    // StringFileInfo
+    let sfi_key = encode_utf16le("StringFileInfo");
+    let mut sfi = Vec::new();
+    sfi.extend_from_slice(&0u16.to_le_bytes()); // placeholder wLength
+    sfi.extend_from_slice(&0u16.to_le_bytes()); // wValueLength = 0
+    sfi.extend_from_slice(&1u16.to_le_bytes()); // wType = text
+    sfi.extend_from_slice(&sfi_key);
+    pad_to_dword(&mut sfi);
+    sfi.extend_from_slice(&table);
+    pad_to_dword(&mut sfi);
+    let slen = sfi.len() as u16;
+    sfi[0..2].copy_from_slice(&slen.to_le_bytes());
+
+    // VS_FIXEDFILEINFO (52 bytes)
+    let mut fixed = vec![0u8; 52];
+    fixed[0..4].copy_from_slice(&0xFEEF04BDu32.to_le_bytes()); // signature
+    fixed[4..8].copy_from_slice(&0x00010000u32.to_le_bytes()); // struc version
+
+    // VS_VERSIONINFO root
+    let root_key = encode_utf16le("VS_VERSION_INFO");
+    let mut root = Vec::new();
+    root.extend_from_slice(&0u16.to_le_bytes()); // placeholder wLength
+    root.extend_from_slice(&52u16.to_le_bytes()); // wValueLength = sizeof(FIXEDFILEINFO)
+    root.extend_from_slice(&0u16.to_le_bytes()); // wType = binary
+    root.extend_from_slice(&root_key);
+    pad_to_dword(&mut root);
+    root.extend_from_slice(&fixed);
+    pad_to_dword(&mut root);
+    root.extend_from_slice(&sfi);
+    pad_to_dword(&mut root);
+    let rlen = root.len() as u16;
+    root[0..2].copy_from_slice(&rlen.to_le_bytes());
+    root
+}
+
+/// Build a PE with a VERSIONINFO resource containing the given company name.
+/// No certificate table, so authenticode.signed = false.
+fn build_pe_with_version_info(company: &str) -> Vec<u8> {
+    let ver_data = build_vs_versioninfo(&[("CompanyName", company)]);
+    let mut data = vec![0u8; 0x2000];
+
+    // DOS header
+    data[0] = b'M'; data[1] = b'Z';
+    data[0x3C..0x40].copy_from_slice(&0x80u32.to_le_bytes());
+
+    // PE signature
+    data[0x80] = b'P'; data[0x81] = b'E';
+
+    // COFF header at 0x84
+    data[0x84..0x86].copy_from_slice(&0x014Cu16.to_le_bytes()); // i386
+    data[0x86..0x88].copy_from_slice(&2u16.to_le_bytes());      // 2 sections
+    data[0x94..0x96].copy_from_slice(&0xE0u16.to_le_bytes());   // SizeOfOptionalHeader
+    data[0x96..0x98].copy_from_slice(&0x0102u16.to_le_bytes()); // Characteristics
+
+    // Optional header at 0x98
+    data[0x98..0x9A].copy_from_slice(&0x010Bu16.to_le_bytes()); // PE32
+    data[0xB4..0xB8].copy_from_slice(&0x400000u32.to_le_bytes()); // ImageBase
+    data[0xB8..0xBC].copy_from_slice(&0x1000u32.to_le_bytes()); // SectionAlignment
+    data[0xBC..0xC0].copy_from_slice(&0x200u32.to_le_bytes());  // FileAlignment
+    data[0xD0..0xD4].copy_from_slice(&0x5000u32.to_le_bytes()); // SizeOfImage
+    data[0xD4..0xD8].copy_from_slice(&0x200u32.to_le_bytes());  // SizeOfHeaders
+    data[0xF4..0xF8].copy_from_slice(&16u32.to_le_bytes());     // NumberOfRvaAndSizes
+
+    // Data Directory[2] = Resource Directory: RVA=0x2000, Size=0x1000
+    let dd2 = 0xF8 + 2 * 8;
+    data[dd2..dd2 + 4].copy_from_slice(&0x2000u32.to_le_bytes());
+    data[dd2 + 4..dd2 + 8].copy_from_slice(&0x1000u32.to_le_bytes());
+
+    // Section 1 (.text) at 0x178
+    let sh1 = 0x178;
+    data[sh1..sh1 + 6].copy_from_slice(b".text\0");
+    data[sh1 + 8..sh1 + 12].copy_from_slice(&0x200u32.to_le_bytes());
+    data[sh1 + 12..sh1 + 16].copy_from_slice(&0x1000u32.to_le_bytes());
+    data[sh1 + 16..sh1 + 20].copy_from_slice(&0x200u32.to_le_bytes());
+    data[sh1 + 20..sh1 + 24].copy_from_slice(&0x200u32.to_le_bytes());
+    data[sh1 + 36..sh1 + 40].copy_from_slice(&0x60000020u32.to_le_bytes());
+
+    // Section 2 (.rsrc) at 0x1A0
+    let sh2 = 0x1A0;
+    data[sh2..sh2 + 6].copy_from_slice(b".rsrc\0");
+    data[sh2 + 8..sh2 + 12].copy_from_slice(&0x1000u32.to_le_bytes());
+    data[sh2 + 12..sh2 + 16].copy_from_slice(&0x2000u32.to_le_bytes());
+    data[sh2 + 16..sh2 + 20].copy_from_slice(&0x1000u32.to_le_bytes());
+    data[sh2 + 20..sh2 + 24].copy_from_slice(&0x400u32.to_le_bytes());
+    data[sh2 + 36..sh2 + 40].copy_from_slice(&0x40000040u32.to_le_bytes());
+
+    // Resource directory at file offset 0x400 (RVA 0x2000)
+    let rb = 0x400;
+
+    // Level 0: 1 ID entry for RT_VERSION (type 16)
+    data[rb + 14..rb + 16].copy_from_slice(&1u16.to_le_bytes());
+    data[rb + 16..rb + 20].copy_from_slice(&16u32.to_le_bytes());
+    data[rb + 20..rb + 24].copy_from_slice(&0x80000018u32.to_le_bytes());
+
+    // Level 1 at rb+0x18
+    let l1 = rb + 0x18;
+    data[l1 + 14..l1 + 16].copy_from_slice(&1u16.to_le_bytes());
+    data[l1 + 16..l1 + 20].copy_from_slice(&1u32.to_le_bytes());
+    data[l1 + 20..l1 + 24].copy_from_slice(&0x80000030u32.to_le_bytes());
+
+    // Level 2 at rb+0x30
+    let l2 = rb + 0x30;
+    data[l2 + 14..l2 + 16].copy_from_slice(&1u16.to_le_bytes());
+    data[l2 + 16..l2 + 20].copy_from_slice(&0x0409u32.to_le_bytes());
+    data[l2 + 20..l2 + 24].copy_from_slice(&0x48u32.to_le_bytes());
+
+    // Data entry at rb+0x48
+    let de = rb + 0x48;
+    let ver_rva = 0x2000u32 + 0x58;
+    data[de..de + 4].copy_from_slice(&ver_rva.to_le_bytes());
+    data[de + 4..de + 8].copy_from_slice(&(ver_data.len() as u32).to_le_bytes());
+
+    // VS_VERSIONINFO data at rb+0x58
+    let vo = rb + 0x58;
+    data[vo..vo + ver_data.len()].copy_from_slice(&ver_data);
+
+    data
+}
+
+#[test]
+fn opsec_004_vendor_mismatch_fires_for_unsigned_vendor_claim() {
+    // PE claims CompanyName="Microsoft Corporation" but has no certificate table.
+    // Authenticode is evaluated (signed=false), so vendor mismatch should fire.
+    let data = build_pe_with_version_info("Microsoft Corporation");
+    let output = petriage_run_with_args(&data, &["--json", "-c"]);
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let val: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let anomalies = val["anomalies"].as_array().expect("should have anomalies");
+    let vendor = anomalies.iter()
+        .find(|a| a["rule_id"] == "OPSEC-004"
+            && a["description"].as_str().unwrap_or("").contains("not signed"));
+    assert!(vendor.is_some(),
+        "OPSEC-004 vendor mismatch should fire for unsigned vendor claim, anomalies: {:?}", anomalies);
+}
+
+#[test]
+fn opsec_004_vendor_mismatch_absent_when_authenticode_not_evaluated() {
+    // With --hashes, authenticode is not parsed, so vendor mismatch should NOT fire,
+    // even when the PE claims a known vendor. "Not evaluated" != "unsigned".
+    let data = build_pe_with_version_info("Microsoft Corporation");
+    let output = petriage_run_with_args(&data, &["--json", "--hashes"]);
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let val: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let anomalies = val["anomalies"].as_array().unwrap();
+    let vendor = anomalies.iter()
+        .find(|a| a["rule_id"] == "OPSEC-004"
+            && a["description"].as_str().unwrap_or("").contains("vendor"));
+    assert!(vendor.is_none(),
+        "OPSEC-004 vendor mismatch should not fire when authenticode is not evaluated");
+}
+
+#[test]
+fn opsec_004_signed_but_unparseable_is_not_unsigned() {
+    // When a PE has a certificate table entry but it can't be parsed
+    // (signed=true, parse_ok=false), the description must NOT say "not signed".
+    // It should either not fire or say "could not be verified".
+    let data = build_pe_with_version_info("Microsoft Corporation");
+    // Adding a broken certificate table to make signed=true, parse_ok=false
+    let mut data = data;
+    // Set Data Directory[4] (Certificate Table) to point to garbage
+    let dd4 = 0xF8 + 4 * 8;
+    data[dd4..dd4 + 4].copy_from_slice(&0x1C00u32.to_le_bytes()); // offset
+    data[dd4 + 4..dd4 + 8].copy_from_slice(&0x100u32.to_le_bytes()); // size
+    // Write minimal WIN_CERTIFICATE header at file offset 0x1C00
+    let cert_off = 0x1C00;
+    if cert_off + 8 <= data.len() {
+        data[cert_off..cert_off + 4].copy_from_slice(&0x100u32.to_le_bytes()); // dwLength
+        data[cert_off + 4..cert_off + 6].copy_from_slice(&0x0200u16.to_le_bytes()); // wRevision
+        data[cert_off + 6..cert_off + 8].copy_from_slice(&0x0002u16.to_le_bytes()); // wCertType=PKCS7
+    }
+    let output = petriage_run_with_args(&data, &["--json", "-c"]);
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let val: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let anomalies = val["anomalies"].as_array().unwrap();
+    let false_unsigned = anomalies.iter()
+        .find(|a| a["rule_id"] == "OPSEC-004"
+            && a["description"].as_str().unwrap_or("").contains("not signed"));
+    assert!(false_unsigned.is_none(),
+        "OPSEC-004 should not say 'not signed' for signed-but-unparseable PE, anomalies: {:?}", anomalies);
+}
+
+#[test]
+fn opsec_section_absent_in_limited_output_mode() {
+    // In limited output modes like --hashes, the structured opsec section
+    // should not appear in JSON (anomalies still present).
+    let pdb = r"C:\Users\dev\repos\project\test.pdb";
+    let data = build_pe_with_pdb_path(pdb);
+    let output = petriage_run_with_args(&data, &["--json", "--hashes"]);
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let val: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert!(val.get("opsec").is_none(),
+        "opsec section should be absent with --hashes");
+    // But anomalies should still contain OPSEC-001
+    let anomalies = val["anomalies"].as_array().unwrap();
+    assert!(anomalies.iter().any(|a| a["rule_id"] == "OPSEC-001"),
+        "OPSEC-001 anomaly should still be present with --hashes");
+}
+
+#[test]
+fn opsec_strict_with_high_min_str_len() {
+    // --opsec-strict should use min_len=6 for credential scanning,
+    // even when -a is used with a high --min-str-len that would miss short patterns.
+    let data = build_pe_with_strings(&[
+        "xoxb-1234567890-abcdefghij",
+    ]);
+    // Use -a with a high min-str-len that would skip the token
+    let output = petriage_run_with_args(&data, &["--json", "-a", "--min-str-len", "30", "--opsec-strict"]);
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let val: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let opsec = val.get("opsec")
+        .expect("should have opsec section with --opsec-strict");
+    let findings = opsec["findings"].as_array().unwrap();
+    assert!(findings.iter().any(|f| f["id"] == "OPSEC-005"),
+        "OPSEC-005 should fire with --opsec-strict even when --min-str-len is high, findings: {:?}", findings);
+}
+
+#[test]
+fn opsec_strict_forces_opsec_section_in_limited_mode() {
+    // --opsec-strict should include the opsec section even with --hashes
+    let pdb = r"C:\Users\dev\repos\project\test.pdb";
+    let data = build_pe_with_pdb_path(pdb);
+    let output = petriage_run_with_args(&data, &["--json", "--hashes", "--opsec-strict"]);
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let val: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert!(val.get("opsec").is_some(),
+        "opsec section should be present with --opsec-strict even in limited mode");
 }

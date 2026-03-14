@@ -74,6 +74,10 @@ struct Cli {
     #[arg(long, value_name = "SEVERITY", value_parser = parse_severity)]
     fail_on: Option<String>,
 
+    /// Enable strict OPSEC analysis (credential and endpoint scanning via strings)
+    #[arg(long)]
+    opsec_strict: bool,
+
     /// Write output to file
     #[arg(short = 'o', long)]
     output: Option<PathBuf>,
@@ -155,6 +159,7 @@ fn analyze_file(
         show_all,
         min_str_len: cli.min_str_len,
         file_name: path.display().to_string(),
+        opsec_strict: cli.opsec_strict,
     }))
 }
 
@@ -321,6 +326,7 @@ fn main() {
         show_all,
         min_str_len: cli.min_str_len,
         file_name: file.display().to_string(),
+        opsec_strict: cli.opsec_strict,
     });
 
     let output_text = if cli.ndjson {

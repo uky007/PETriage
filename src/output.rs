@@ -41,8 +41,41 @@ pub fn format_text(result: &AnalysisResult) -> String {
         out.push('\n');
     }
 
-    // OPSEC: PDB Path warning (prominent, before hashes)
-    if let Some(ref debug) = result.debug {
+    // OPSEC Analysis section (structured findings)
+    if let Some(ref opsec) = result.opsec {
+        out.push_str(&format!("{}\n", "=== OPSEC Analysis ===".yellow().bold()));
+        let sev_str = match opsec.summary.max_severity.as_str() {
+            "critical" => format!("{}", "CRITICAL".red().bold()),
+            "warning" => format!("{}", "WARNING".yellow()),
+            "info" => format!("{}", "INFO".cyan()),
+            _ => "NONE".to_string(),
+        };
+        out.push_str(&format!("  Findings: {}  Max Severity: {}\n",
+            opsec.summary.finding_count, sev_str));
+        if !opsec.summary.types.is_empty() {
+            out.push_str("  Types:");
+            for (t, c) in &opsec.summary.types {
+                out.push_str(&format!(" {}={}", t, c));
+            }
+            out.push('\n');
+        }
+        out.push('\n');
+        for finding in &opsec.findings {
+            let tag = match finding.severity.as_str() {
+                "critical" => format!("{}", "[CRITICAL]".red().bold()),
+                "warning" => format!("{}", "[WARNING]".yellow()),
+                "info" => format!("{}", "[INFO]".cyan()),
+                _ => String::new(),
+            };
+            out.push_str(&format!("  {} {} {}: {}\n",
+                tag,
+                format!("[{}]", finding.id).dimmed(),
+                finding.finding_type,
+                finding.description));
+        }
+        out.push('\n');
+    } else if let Some(ref debug) = result.debug {
+        // Fallback: show PDB paths even without full OPSEC findings
         let pdb_paths: Vec<&str> = debug.entries.iter()
             .filter_map(|e| e.pdb_path.as_deref())
             .collect();

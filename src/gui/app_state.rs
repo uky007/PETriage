@@ -14,6 +14,7 @@ pub enum Tab {
     Tls,
     Debug,
     Authenticode,
+    Opsec,
     Editor,
 }
 
@@ -31,6 +32,7 @@ impl Tab {
         Tab::Tls,
         Tab::Debug,
         Tab::Authenticode,
+        Tab::Opsec,
         Tab::Editor,
     ];
 
@@ -48,6 +50,7 @@ impl Tab {
             Tab::Tls => "TLS",
             Tab::Debug => "Debug",
             Tab::Authenticode => "Signing",
+            Tab::Opsec => "OPSEC",
             Tab::Editor => "Editor",
         }
     }

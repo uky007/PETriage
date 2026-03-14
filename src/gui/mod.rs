@@ -185,6 +185,7 @@ impl ReadpeApp {
                             show_all: true,
                             min_str_len: self.options.min_str_len,
                             file_name: file_name.clone(),
+                            opsec_strict: true,
                         };
                         let result = analysis::analyze(&data, &pe, &opts);
                         self.imports_state = ImportsState::default();
@@ -227,6 +228,7 @@ impl ReadpeApp {
                         show_all: true,
                         min_str_len: self.options.min_str_len,
                         file_name: file_name.clone(),
+                        opsec_strict: true,
                     };
                     let result = analysis::analyze(&data, &pe, &opts);
                     self.imports_state = ImportsState::default();
@@ -510,6 +512,7 @@ impl eframe::App for ReadpeApp {
                                             Tab::Tls => panels::tls::show(ui, &result),
                                             Tab::Debug => panels::debug::show(ui, &result),
                                             Tab::Authenticode => panels::authenticode::show(ui, &result),
+                                            Tab::Opsec => panels::opsec::show(ui, &result),
                                             Tab::Editor => panels::editor::show(ui, &data, &mut self.editor_state),
                                         }
                                     });
