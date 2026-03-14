@@ -91,11 +91,11 @@ See [docs/usage.md](docs/usage.md) for full CLI options, `jq` recipes, TUI/GUI d
 
 ## Docs
 
-- [Overview & Features](docs/description.md)
-- [Installation](docs/installation.md)
-- [Usage & Examples](docs/usage.md)
-- [Survey of Existing Tools](docs/survey.md)
-- [Future Work](docs/future_work.md)
+- [Overview & Features](https://github.com/uky007/PETriage/blob/main/docs/description.md)
+- [Installation](https://github.com/uky007/PETriage/blob/main/docs/installation.md)
+- [Usage & Examples](https://github.com/uky007/PETriage/blob/main/docs/usage.md)
+- [Survey of Existing Tools](https://github.com/uky007/PETriage/blob/main/docs/survey.md)
+- [Future Work](https://github.com/uky007/PETriage/blob/main/docs/future_work.md)
 
 ## License
 
