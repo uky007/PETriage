@@ -2188,3 +2188,486 @@ fn opsec_strict_forces_opsec_section_in_limited_mode() {
     assert!(val.get("opsec").is_some(),
         "opsec section should be present with --opsec-strict even in limited mode");
 }
+
+// --- .NET detection tests ---
+
+fn build_pe_with_dotnet() -> Vec<u8> {
+    // Build a PE with Data Directory 14 (COM_DESCRIPTOR) pointing to COR20 header
+    // and BSJB metadata root
+    let mut data = vec![0u8; 0x2000];
+
+    // DOS header
+    data[0] = b'M'; data[1] = b'Z';
+    data[0x3C..0x40].copy_from_slice(&0x80u32.to_le_bytes());
+
+    // PE signature at 0x80
+    data[0x80] = b'P'; data[0x81] = b'E';
+
+    // COFF header at 0x84
+    data[0x84..0x86].copy_from_slice(&0x014Cu16.to_le_bytes()); // i386
+    data[0x86..0x88].copy_from_slice(&1u16.to_le_bytes());      // 1 section
+    data[0x94..0x96].copy_from_slice(&0xE0u16.to_le_bytes());   // SizeOfOptionalHeader
+    data[0x96..0x98].copy_from_slice(&0x0102u16.to_le_bytes()); // Characteristics
+
+    // Optional header at 0x98
+    data[0x98..0x9A].copy_from_slice(&0x010Bu16.to_le_bytes()); // PE32 magic
+    data[0xB4..0xB8].copy_from_slice(&0x400000u32.to_le_bytes()); // ImageBase
+    data[0xB8..0xBC].copy_from_slice(&0x1000u32.to_le_bytes()); // SectionAlignment
+    data[0xBC..0xC0].copy_from_slice(&0x200u32.to_le_bytes());  // FileAlignment
+    data[0xD0..0xD4].copy_from_slice(&0x3000u32.to_le_bytes()); // SizeOfImage
+    data[0xD4..0xD8].copy_from_slice(&0x200u32.to_le_bytes());  // SizeOfHeaders
+    data[0xF4..0xF8].copy_from_slice(&16u32.to_le_bytes());     // NumberOfRvaAndSizes
+
+    // Data Directory[14] = COM_DESCRIPTOR: RVA=0x1000, Size=72
+    let dd14_offset = 0xF8 + 14 * 8;
+    data[dd14_offset..dd14_offset + 4].copy_from_slice(&0x1000u32.to_le_bytes());
+    data[dd14_offset + 4..dd14_offset + 8].copy_from_slice(&72u32.to_le_bytes());
+
+    // Section header at 0x178 (.text covering RVA 0x1000)
+    let sh = 0x178;
+    data[sh..sh + 6].copy_from_slice(b".text\0");
+    data[sh + 8..sh + 12].copy_from_slice(&0x1000u32.to_le_bytes());  // VirtualSize
+    data[sh + 12..sh + 16].copy_from_slice(&0x1000u32.to_le_bytes()); // VirtualAddress
+    data[sh + 16..sh + 20].copy_from_slice(&0x1800u32.to_le_bytes()); // SizeOfRawData
+    data[sh + 20..sh + 24].copy_from_slice(&0x200u32.to_le_bytes());  // PointerToRawData
+    data[sh + 36..sh + 40].copy_from_slice(&0x60000020u32.to_le_bytes()); // CODE|EXECUTE|READ
+
+    // IMAGE_COR20_HEADER at file offset 0x200 (RVA 0x1000)
+    let cor = 0x200;
+    data[cor..cor + 4].copy_from_slice(&72u32.to_le_bytes()); // cb
+    data[cor + 4..cor + 6].copy_from_slice(&2u16.to_le_bytes()); // MajorRuntimeVersion
+    data[cor + 6..cor + 8].copy_from_slice(&5u16.to_le_bytes()); // MinorRuntimeVersion
+    // MetaData RVA = 0x1048 (file offset 0x248), Size = 0x100
+    data[cor + 8..cor + 12].copy_from_slice(&0x1048u32.to_le_bytes());
+    data[cor + 12..cor + 16].copy_from_slice(&0x100u32.to_le_bytes());
+    // Flags = IL_ONLY (0x01)
+    data[cor + 16..cor + 20].copy_from_slice(&0x01u32.to_le_bytes());
+
+    // Metadata root at file offset 0x248 (RVA 0x1048)
+    let meta = 0x248;
+    // BSJB signature
+    data[meta..meta + 4].copy_from_slice(&0x424A5342u32.to_le_bytes());
+    // MajorVersion=1, MinorVersion=1
+    data[meta + 4..meta + 6].copy_from_slice(&1u16.to_le_bytes());
+    data[meta + 6..meta + 8].copy_from_slice(&1u16.to_le_bytes());
+    // Reserved
+    data[meta + 8..meta + 12].copy_from_slice(&0u32.to_le_bytes());
+    // Length of version string = 12 (padded to 12 from "v4.0.30319\0\0")
+    data[meta + 12..meta + 16].copy_from_slice(&12u32.to_le_bytes());
+    // Version string
+    let ver = b"v4.0.30319\0\0";
+    data[meta + 16..meta + 16 + ver.len()].copy_from_slice(ver);
+
+    // After version string: Flags(2) + NumberOfStreams(2)
+    let soff = meta + 16 + 12; // 0x274
+    data[soff..soff + 2].copy_from_slice(&0u16.to_le_bytes()); // Flags
+    data[soff + 2..soff + 4].copy_from_slice(&1u16.to_le_bytes()); // 1 stream (#Strings)
+
+    // Stream header: offset, size, name
+    let shdr = soff + 4;
+    data[shdr..shdr + 4].copy_from_slice(&0xC0u32.to_le_bytes()); // offset from metadata root
+    data[shdr + 4..shdr + 8].copy_from_slice(&0x40u32.to_le_bytes()); // size
+    let sname = b"#Strings\0\0\0\0"; // padded to 12 bytes (4-byte aligned)
+    data[shdr + 8..shdr + 8 + sname.len()].copy_from_slice(sname);
+
+    // #Strings heap at meta + 0xC0 = 0x308
+    let strings_off = meta + 0xC0;
+    data[strings_off] = 0; // first entry is always empty
+    let module_name = b"TestModule\0";
+    data[strings_off + 1..strings_off + 1 + module_name.len()].copy_from_slice(module_name);
+
+    data
+}
+
+#[test]
+fn dotnet_detection_with_clr_header() {
+    let data = build_pe_with_dotnet();
+    let output = petriage_run_with_args(&data, &["--json", "-a"]);
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let val: serde_json::Value = serde_json::from_str(&stdout)
+        .expect("stdout should be valid JSON");
+    let dotnet = val.get("dotnet")
+        .expect("should have dotnet section with -a");
+    assert!(dotnet["runtime_version"].as_str().unwrap().contains("4.0.30319"),
+        "runtime_version should contain v4.0.30319, got: {}", dotnet["runtime_version"]);
+    let flags = dotnet["flags"].as_array().unwrap();
+    assert!(flags.iter().any(|f| f.as_str() == Some("IL_ONLY")),
+        "flags should contain IL_ONLY, got: {:?}", flags);
+
+    // Build fingerprint should show .NET
+    let fp = val.get("build_fingerprint").expect("should have build_fingerprint");
+    assert_eq!(fp["compiler"].as_str(), Some(".NET"));
+    assert!(fp["is_managed"].as_bool() == Some(true));
+}
+
+// --- Go detection tests ---
+
+#[test]
+fn go_detection_with_markers() {
+    let mut data = build_pe_with_strings(&[
+        "runtime.go",
+        "GOMAXPROCS",
+        "some other string",
+    ]);
+    // Also embed a Go build ID marker
+    let marker = b"\xff Go build ID: \"abc123/def456/ghi789/jkl012\"\n \xff";
+    let offset = 0x400;
+    if offset + marker.len() < data.len() {
+        data[offset..offset + marker.len()].copy_from_slice(marker);
+    }
+    let output = petriage_run_with_args(&data, &["--json", "-a"]);
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let val: serde_json::Value = serde_json::from_str(&stdout)
+        .expect("stdout should be valid JSON");
+    let go = val.get("go").expect("should have go section");
+    let markers = go["markers"].as_array().unwrap();
+    assert!(markers.len() >= 2, "should have at least 2 markers, got: {:?}", markers);
+    assert!(go["build_id"].is_string(), "should have build_id");
+    assert_eq!(go["build_id"].as_str(), Some("abc123/def456/ghi789/jkl012"));
+
+    // Build fingerprint should show Go
+    let fp = val.get("build_fingerprint").expect("should have build_fingerprint");
+    assert_eq!(fp["compiler"].as_str(), Some("Go"));
+}
+
+#[test]
+fn go_detection_absent_with_single_marker() {
+    // Only one marker - should not detect Go (needs >= 2)
+    let data = build_pe_with_strings(&[
+        "runtime.go",
+        "some other string",
+    ]);
+    let output = petriage_run_with_args(&data, &["--json", "-a"]);
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let val: serde_json::Value = serde_json::from_str(&stdout)
+        .expect("stdout should be valid JSON");
+    assert!(val.get("go").is_none(),
+        "go section should be absent with only 1 marker");
+}
+
+// --- Overlay classification tests ---
+
+#[test]
+fn overlay_classification_zip() {
+    let mut data = build_pe_with_pdb_path("test.pdb");
+    // Append ZIP magic as overlay (after sections end)
+    data.extend_from_slice(b"PK\x03\x04rest_of_zip_data_here");
+    let output = petriage_run_with_args(&data, &["--json", "--overlay"]);
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let val: serde_json::Value = serde_json::from_str(&stdout)
+        .expect("stdout should be valid JSON");
+    let overlay = val.get("overlay").expect("should have overlay");
+    assert!(overlay["present"].as_bool() == Some(true));
+    let classification = overlay["classification"].as_array()
+        .expect("overlay should have classification");
+    assert!(classification.iter().any(|c| c["format"].as_str() == Some("ZIP")),
+        "classification should include ZIP, got: {:?}", classification);
+}
+
+#[test]
+fn overlay_classification_nsis() {
+    let mut data = build_pe_with_pdb_path("test.pdb");
+    // NSIS magic: 0xDEADBEEF (little-endian in overlay)
+    data.extend_from_slice(&[0xef, 0xbe, 0xad, 0xde]);
+    data.extend_from_slice(b"nsis_data_here");
+    let output = petriage_run_with_args(&data, &["--json", "--overlay"]);
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let val: serde_json::Value = serde_json::from_str(&stdout)
+        .expect("stdout should be valid JSON");
+    let overlay = val.get("overlay").expect("should have overlay");
+    let classification = overlay["classification"].as_array()
+        .expect("overlay should have classification");
+    assert!(classification.iter().any(|c| c["format"].as_str() == Some("NSIS")),
+        "classification should include NSIS, got: {:?}", classification);
+}
+
+// --- CI/CD path hint tests ---
+
+#[test]
+fn opsec_008_cicd_azure_devops_path() {
+    let pdb = r"D:\agent\_work\1\s\src\Release\payload.pdb";
+    let data = build_pe_with_pdb_path(pdb);
+    let output = petriage_run_with_args(&data, &["--json", "-a", "--opsec-strict"]);
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let val: serde_json::Value = serde_json::from_str(&stdout)
+        .expect("stdout should be valid JSON");
+    let opsec = val.get("opsec").expect("should have opsec section");
+    let findings = opsec["findings"].as_array().unwrap();
+    let ci_finding = findings.iter().find(|f| f["id"] == "OPSEC-008");
+    assert!(ci_finding.is_some(),
+        "OPSEC-008 should fire for Azure DevOps path, findings: {:?}", findings);
+    let ci = ci_finding.unwrap();
+    assert_eq!(ci["type"].as_str(), Some("ci_cd_trace"));
+    let ev = ci["evidence"].as_object().unwrap();
+    assert_eq!(ev.get("ci_system").and_then(|v| v.as_str()), Some("ci_azure_devops"));
+}
+
+#[test]
+fn opsec_008_cicd_github_actions_path() {
+    let pdb = r"C:\actions-runner\_work\project\src\Release\app.pdb";
+    let data = build_pe_with_pdb_path(pdb);
+    let output = petriage_run_with_args(&data, &["--json", "-a", "--opsec-strict"]);
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let val: serde_json::Value = serde_json::from_str(&stdout)
+        .expect("stdout should be valid JSON");
+    let opsec = val.get("opsec").expect("should have opsec section");
+    let findings = opsec["findings"].as_array().unwrap();
+    let ci_finding = findings.iter().find(|f| f["id"] == "OPSEC-008");
+    assert!(ci_finding.is_some(),
+        "OPSEC-008 should fire for GitHub Actions path");
+    assert_eq!(ci_finding.unwrap()["evidence"]["ci_system"].as_str(), Some("ci_github_actions"));
+}
+
+#[test]
+fn opsec_008_cicd_jenkins_path() {
+    let pdb = r"C:\jenkins\workspace\project\bin\Release\app.pdb";
+    let data = build_pe_with_pdb_path(pdb);
+    let output = petriage_run_with_args(&data, &["--json", "-a", "--opsec-strict"]);
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let val: serde_json::Value = serde_json::from_str(&stdout)
+        .expect("stdout should be valid JSON");
+    let opsec = val.get("opsec").expect("should have opsec section");
+    let findings = opsec["findings"].as_array().unwrap();
+    let ci_finding = findings.iter().find(|f| f["id"] == "OPSEC-008");
+    assert!(ci_finding.is_some(),
+        "OPSEC-008 should fire for Jenkins path");
+    assert_eq!(ci_finding.unwrap()["evidence"]["ci_system"].as_str(), Some("ci_build_server"));
+}
+
+// --- Timestamp correlation tests ---
+
+#[test]
+fn time_004_coff_debug_timestamp_mismatch() {
+    // Build PE with debug timestamp that differs significantly from COFF timestamp
+    let mut data = build_pe_with_pdb_path("test.pdb");
+
+    // Set COFF timestamp to 2024-01-01 00:00:00 UTC (1704067200)
+    let coff_ts: u32 = 1704067200;
+    data[0x88..0x8C].copy_from_slice(&coff_ts.to_le_bytes());
+
+    // Debug directory entry timestamp at file offset 0x200 + 4 = 0x204
+    // (IMAGE_DEBUG_DIRECTORY: Characteristics(4), TimeDateStamp(4))
+    let debug_ts: u32 = 1704067200 + 200000; // ~2.3 days later
+    data[0x204..0x208].copy_from_slice(&debug_ts.to_le_bytes());
+
+    let output = petriage_run_with_args(&data, &["--json"]);
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let val: serde_json::Value = serde_json::from_str(&stdout)
+        .expect("stdout should be valid JSON");
+    let anomalies = val["anomalies"].as_array().expect("should have anomalies");
+    let time004 = anomalies.iter().find(|a| a["rule_id"] == "TIME-004");
+    assert!(time004.is_some(),
+        "TIME-004 should fire for timestamp mismatch > 24h, anomalies: {:?}", anomalies);
+    assert_eq!(time004.unwrap()["severity"].as_str(), Some("warning"));
+}
+
+#[test]
+fn time_004_no_fire_when_timestamps_close() {
+    // Build PE where COFF and debug timestamps are within 24h
+    let mut data = build_pe_with_pdb_path("test.pdb");
+
+    let coff_ts: u32 = 1704067200;
+    data[0x88..0x8C].copy_from_slice(&coff_ts.to_le_bytes());
+
+    // Debug timestamp only 1 hour apart
+    let debug_ts: u32 = 1704067200 + 3600;
+    data[0x204..0x208].copy_from_slice(&debug_ts.to_le_bytes());
+
+    let output = petriage_run_with_args(&data, &["--json"]);
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let val: serde_json::Value = serde_json::from_str(&stdout)
+        .expect("stdout should be valid JSON");
+    let anomalies = val["anomalies"].as_array().expect("should have anomalies");
+    let time004 = anomalies.iter().find(|a| a["rule_id"] == "TIME-004");
+    assert!(time004.is_none(),
+        "TIME-004 should not fire when timestamps are within 24h");
+}
+
+// --- InternalName mismatch tests ---
+
+fn build_pe_with_version_info_kv(kv: &[(&str, &str)]) -> Vec<u8> {
+    let ver_data = build_vs_versioninfo(kv);
+    let mut data = vec![0u8; 0x2000];
+
+    // DOS header
+    data[0] = b'M'; data[1] = b'Z';
+    data[0x3C..0x40].copy_from_slice(&0x80u32.to_le_bytes());
+
+    // PE signature
+    data[0x80] = b'P'; data[0x81] = b'E';
+
+    // COFF header at 0x84
+    data[0x84..0x86].copy_from_slice(&0x014Cu16.to_le_bytes()); // i386
+    data[0x86..0x88].copy_from_slice(&2u16.to_le_bytes());      // 2 sections
+    data[0x94..0x96].copy_from_slice(&0xE0u16.to_le_bytes());   // SizeOfOptionalHeader
+    data[0x96..0x98].copy_from_slice(&0x0102u16.to_le_bytes()); // Characteristics
+
+    // Optional header at 0x98
+    data[0x98..0x9A].copy_from_slice(&0x010Bu16.to_le_bytes()); // PE32
+    data[0xB4..0xB8].copy_from_slice(&0x400000u32.to_le_bytes()); // ImageBase
+    data[0xB8..0xBC].copy_from_slice(&0x1000u32.to_le_bytes()); // SectionAlignment
+    data[0xBC..0xC0].copy_from_slice(&0x200u32.to_le_bytes());  // FileAlignment
+    data[0xD0..0xD4].copy_from_slice(&0x5000u32.to_le_bytes()); // SizeOfImage
+    data[0xD4..0xD8].copy_from_slice(&0x200u32.to_le_bytes());  // SizeOfHeaders
+    data[0xF4..0xF8].copy_from_slice(&16u32.to_le_bytes());     // NumberOfRvaAndSizes
+
+    // Data Directory[2] = Resource Directory: RVA=0x2000, Size=0x1000
+    let dd2 = 0xF8 + 2 * 8;
+    data[dd2..dd2 + 4].copy_from_slice(&0x2000u32.to_le_bytes());
+    data[dd2 + 4..dd2 + 8].copy_from_slice(&0x1000u32.to_le_bytes());
+
+    // Section 1 (.text) at 0x178
+    let sh1 = 0x178;
+    data[sh1..sh1 + 6].copy_from_slice(b".text\0");
+    data[sh1 + 8..sh1 + 12].copy_from_slice(&0x200u32.to_le_bytes());
+    data[sh1 + 12..sh1 + 16].copy_from_slice(&0x1000u32.to_le_bytes());
+    data[sh1 + 16..sh1 + 20].copy_from_slice(&0x200u32.to_le_bytes());
+    data[sh1 + 20..sh1 + 24].copy_from_slice(&0x200u32.to_le_bytes());
+    data[sh1 + 36..sh1 + 40].copy_from_slice(&0x60000020u32.to_le_bytes());
+
+    // Section 2 (.rsrc) at 0x1A0
+    let sh2 = 0x1A0;
+    data[sh2..sh2 + 6].copy_from_slice(b".rsrc\0");
+    data[sh2 + 8..sh2 + 12].copy_from_slice(&0x1000u32.to_le_bytes());
+    data[sh2 + 12..sh2 + 16].copy_from_slice(&0x2000u32.to_le_bytes());
+    data[sh2 + 16..sh2 + 20].copy_from_slice(&0x1000u32.to_le_bytes());
+    data[sh2 + 20..sh2 + 24].copy_from_slice(&0x400u32.to_le_bytes());
+    data[sh2 + 36..sh2 + 40].copy_from_slice(&0x40000040u32.to_le_bytes());
+
+    // Resource directory at file offset 0x400 (RVA 0x2000)
+    let rb = 0x400;
+
+    // Level 0: 1 ID entry for RT_VERSION (type 16)
+    data[rb + 14..rb + 16].copy_from_slice(&1u16.to_le_bytes());
+    data[rb + 16..rb + 20].copy_from_slice(&16u32.to_le_bytes());
+    data[rb + 20..rb + 24].copy_from_slice(&0x80000018u32.to_le_bytes());
+
+    // Level 1 at rb+0x18
+    let l1 = rb + 0x18;
+    data[l1 + 14..l1 + 16].copy_from_slice(&1u16.to_le_bytes());
+    data[l1 + 16..l1 + 20].copy_from_slice(&1u32.to_le_bytes());
+    data[l1 + 20..l1 + 24].copy_from_slice(&0x80000030u32.to_le_bytes());
+
+    // Level 2 at rb+0x30
+    let l2 = rb + 0x30;
+    data[l2 + 14..l2 + 16].copy_from_slice(&1u16.to_le_bytes());
+    data[l2 + 16..l2 + 20].copy_from_slice(&0x0409u32.to_le_bytes());
+    data[l2 + 20..l2 + 24].copy_from_slice(&0x48u32.to_le_bytes());
+
+    // Data entry at rb+0x48
+    let de = rb + 0x48;
+    let ver_rva = 0x2000u32 + 0x58;
+    data[de..de + 4].copy_from_slice(&ver_rva.to_le_bytes());
+    data[de + 4..de + 8].copy_from_slice(&(ver_data.len() as u32).to_le_bytes());
+
+    // VS_VERSIONINFO data at rb+0x58
+    let vo = rb + 0x58;
+    data[vo..vo + ver_data.len()].copy_from_slice(&ver_data);
+
+    data
+}
+
+#[test]
+fn opsec_004_internal_name_mismatch() {
+    // PE with InternalName different from on-disk filename
+    let data = build_pe_with_version_info_kv(&[("InternalName", "totally_different.exe")]);
+    let output = petriage_run_with_args(&data, &["--json", "-a", "--opsec-strict"]);
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let val: serde_json::Value = serde_json::from_str(&stdout)
+        .expect("stdout should be valid JSON");
+    let opsec = val.get("opsec").expect("should have opsec section");
+    let findings = opsec["findings"].as_array().unwrap();
+    let mismatch = findings.iter().find(|f| {
+        f["id"] == "OPSEC-004"
+            && f["description"].as_str().unwrap_or("").contains("InternalName")
+    });
+    assert!(mismatch.is_some(),
+        "OPSEC-004 should fire for InternalName mismatch, findings: {:?}", findings);
+}
+
+// --- Build fingerprint tests ---
+
+#[test]
+fn build_fingerprint_absent_in_limited_mode() {
+    let data = build_pe_with_pdb_path("test.pdb");
+    let output = petriage_run_with_args(&data, &["--json", "--hashes"]);
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let val: serde_json::Value = serde_json::from_str(&stdout)
+        .expect("stdout should be valid JSON");
+    assert!(val.get("build_fingerprint").is_none(),
+        "build_fingerprint should be absent in limited mode");
+    assert!(val.get("dotnet").is_none(),
+        "dotnet should be absent in limited mode");
+    assert!(val.get("go").is_none(),
+        "go should be absent in limited mode");
+}
+
+#[test]
+fn build_fingerprint_rust_from_pdb_path() {
+    let pdb = r"C:\Users\dev\repos\myapp\target\release\deps\myapp.pdb";
+    let data = build_pe_with_pdb_path(pdb);
+    let output = petriage_run_with_args(&data, &["--json", "-a"]);
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let val: serde_json::Value = serde_json::from_str(&stdout)
+        .expect("stdout should be valid JSON");
+    let fp = val.get("build_fingerprint").expect("should have build_fingerprint");
+    assert_eq!(fp["compiler"].as_str(), Some("Rust"),
+        "should detect Rust from PDB path containing target/release");
+}
+
+// --- No-panic test for dotnet with truncated metadata ---
+
+#[test]
+fn no_panic_dotnet_truncated_metadata() {
+    // Build a PE with DD[14] pointing to data but metadata is truncated
+    let mut data = vec![0u8; 0x400];
+    data[0] = b'M'; data[1] = b'Z';
+    data[0x3C..0x40].copy_from_slice(&0x80u32.to_le_bytes());
+    data[0x80] = b'P'; data[0x81] = b'E';
+    data[0x84..0x86].copy_from_slice(&0x014Cu16.to_le_bytes());
+    data[0x86..0x88].copy_from_slice(&1u16.to_le_bytes());
+    data[0x94..0x96].copy_from_slice(&0xE0u16.to_le_bytes());
+    data[0x96..0x98].copy_from_slice(&0x0102u16.to_le_bytes());
+    data[0x98..0x9A].copy_from_slice(&0x010Bu16.to_le_bytes());
+    data[0xB4..0xB8].copy_from_slice(&0x400000u32.to_le_bytes());
+    data[0xB8..0xBC].copy_from_slice(&0x1000u32.to_le_bytes());
+    data[0xBC..0xC0].copy_from_slice(&0x200u32.to_le_bytes());
+    data[0xD0..0xD4].copy_from_slice(&0x3000u32.to_le_bytes());
+    data[0xD4..0xD8].copy_from_slice(&0x200u32.to_le_bytes());
+    data[0xF4..0xF8].copy_from_slice(&16u32.to_le_bytes());
+    // DD[14] = RVA 0x1000, Size 72
+    let dd14 = 0xF8 + 14 * 8;
+    data[dd14..dd14 + 4].copy_from_slice(&0x1000u32.to_le_bytes());
+    data[dd14 + 4..dd14 + 8].copy_from_slice(&72u32.to_le_bytes());
+    // Section at 0x178
+    let sh = 0x178;
+    data[sh..sh + 6].copy_from_slice(b".text\0");
+    data[sh + 8..sh + 12].copy_from_slice(&0x200u32.to_le_bytes());
+    data[sh + 12..sh + 16].copy_from_slice(&0x1000u32.to_le_bytes());
+    data[sh + 16..sh + 20].copy_from_slice(&0x200u32.to_le_bytes());
+    data[sh + 20..sh + 24].copy_from_slice(&0x200u32.to_le_bytes());
+    data[sh + 36..sh + 40].copy_from_slice(&0x60000020u32.to_le_bytes());
+    // COR20 header at 0x200 but metadata RVA points to garbage
+    let cor = 0x200;
+    data[cor..cor + 4].copy_from_slice(&72u32.to_le_bytes());
+    data[cor + 4..cor + 6].copy_from_slice(&2u16.to_le_bytes());
+    data[cor + 6..cor + 8].copy_from_slice(&5u16.to_le_bytes());
+    data[cor + 8..cor + 12].copy_from_slice(&0x1100u32.to_le_bytes()); // points beyond section
+    data[cor + 12..cor + 16].copy_from_slice(&0x100u32.to_le_bytes());
+
+    let output = petriage_run_with_args(&data, &["--json"]);
+    assert_no_panic(&output);
+}

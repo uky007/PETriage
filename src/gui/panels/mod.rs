@@ -11,4 +11,5 @@ pub mod tls;
 pub mod debug;
 pub mod authenticode;
 pub mod opsec;
+pub mod build_info;
 pub mod editor;

@@ -64,6 +64,12 @@ pub struct AnalysisResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub opsec: Option<OpsecInfo>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub build_fingerprint: Option<BuildFingerprint>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dotnet: Option<DotNetInfo>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub go: Option<GoInfo>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub anomalies: Option<Vec<Anomaly>>,
 }
 
@@ -209,6 +215,8 @@ pub struct OverlayInfo {
     pub offset: usize,
     pub size: usize,
     pub present: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub classification: Option<Vec<OverlayClassification>>,
 }
 
 #[derive(Clone, Debug)]
@@ -387,6 +395,42 @@ pub struct OpsecFinding {
     pub confidence: f32,
 }
 
+#[derive(Clone, Debug, Serialize)]
+pub struct BuildFingerprint {
+    pub compiler: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compiler_version: Option<String>,
+    pub is_managed: bool,
+    pub confidence: f32,
+    pub evidence: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct DotNetInfo {
+    pub runtime_version: String,
+    pub flags: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub assembly_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub assembly_version: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub references: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct GoInfo {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub build_id: Option<String>,
+    pub confidence: f32,
+    pub markers: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct OverlayClassification {
+    pub format: String,
+    pub confidence: f32,
+}
+
 pub fn analyze(data: &[u8], pe: &PE, opts: &AnalysisOptions) -> AnalysisResult {
     let pe_type = if pe.is_64 { "PE32+ (64-bit)" } else { "PE32 (32-bit)" }.to_string();
 
@@ -447,11 +491,12 @@ pub fn analyze(data: &[u8], pe: &PE, opts: &AnalysisOptions) -> AnalysisResult {
         h.imphash = compute_imphash(pe);
     }
 
-    let overlay = if opts.show_overlay {
-        Some(detect_overlay(data, pe))
-    } else {
-        None
-    };
+    // Always detect overlay for anomaly detection (STRUCT-002)
+    let mut overlay_info = detect_overlay(data, pe);
+    if overlay_info.present {
+        overlay_info.classification = classify_overlay(data, overlay_info.offset, overlay_info.size);
+    }
+    let overlay_for_anomalies = Some(overlay_info);
 
     // Always parse resources for OPSEC-004 version mismatch detection,
     // but only include in output when show_resources.
@@ -473,14 +518,18 @@ pub fn analyze(data: &[u8], pe: &PE, opts: &AnalysisOptions) -> AnalysisResult {
     // like --hashes don't get an unexpected OPSEC section.
     let debug = parse_debug(data, pe);
 
+    // .NET and Go detection
+    let dotnet = parse_dotnet(data, pe);
+    let go = detect_go(data, pe);
+
     let suspicious_summary = imports.as_ref().map(|imp| build_suspicious_summary(imp));
 
     let mut anomalies_vec = detect_anomalies(
-        &sections, &coff_header, &optional_header, &overlay, &suspicious_summary, &debug,
+        &sections, &coff_header, &optional_header, &overlay_for_anomalies, &suspicious_summary, &debug,
         &rich_header_parsed,
     );
 
-    // OPSEC detection (OPSEC-002 through OPSEC-007)
+    // OPSEC detection (OPSEC-002 through OPSEC-008)
     // When opsec_strict, always extract with min_len=6 for credential/endpoint scanning
     // regardless of display_strings (which may use a higher min_str_len).
     let opsec_strings = if opts.opsec_strict {
@@ -495,6 +544,9 @@ pub fn analyze(data: &[u8], pe: &PE, opts: &AnalysisOptions) -> AnalysisResult {
     );
     anomalies_vec.extend(opsec_anomalies);
 
+    // Build fingerprint (uses dotnet/go/debug/rich_header/optional_header/imports)
+    let fp = build_fingerprint(&dotnet, &go, &debug, &rich_header_parsed, &optional_header, &imports);
+
     let rich_header = if opts.show_all { rich_header_parsed } else { None };
     let debug_output = if opts.show_all { debug } else { None };
     let resources = if opts.show_resources { resources_parsed } else { None };
@@ -507,6 +559,12 @@ pub fn analyze(data: &[u8], pe: &PE, opts: &AnalysisOptions) -> AnalysisResult {
     } else {
         None
     };
+
+    // Gate overlay, dotnet, go, and build_fingerprint for output
+    let overlay = if opts.show_overlay { overlay_for_anomalies } else { None };
+    let fp_output = if opts.show_all { fp } else { None };
+    let dotnet_output = if opts.show_all { dotnet } else { None };
+    let go_output = if opts.show_all { go } else { None };
 
     AnalysisResult {
         file_info,
@@ -526,6 +584,9 @@ pub fn analyze(data: &[u8], pe: &PE, opts: &AnalysisOptions) -> AnalysisResult {
         debug: debug_output,
         suspicious_summary,
         opsec,
+        build_fingerprint: fp_output,
+        dotnet: dotnet_output,
+        go: go_output,
         anomalies: Some(anomalies_vec),
     }
 }
@@ -787,6 +848,32 @@ fn detect_anomalies(
         }
     }
 
+    // TIME-004: COFF timestamp vs Debug timestamp mismatch
+    if let Some(coff) = coff_header {
+        if let Some(dbg) = debug {
+            for entry in &dbg.entries {
+                if entry.debug_type_raw == 2 && entry.timestamp != 0 && coff.time_date_stamp != 0 {
+                    let delta = (coff.time_date_stamp as i64 - entry.timestamp as i64).unsigned_abs();
+                    if delta > 86400 { // more than 24 hours apart
+                        anomalies.push(Anomaly {
+                            rule_id: "TIME-004".into(),
+                            category: "Timestamp".into(),
+                            severity: "warning".into(),
+                            description: format!(
+                                "COFF timestamp and debug timestamp differ by {} hours",
+                                delta / 3600
+                            ),
+                            evidence: Some(format!("coff={:#x}, debug={:#x}, delta={}s",
+                                coff.time_date_stamp, entry.timestamp, delta)),
+                            threshold: Some("86400".into()),
+                        });
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
     // Rule 14: Overlay detected
     if let Some(overlay) = overlay
         && overlay.present {
@@ -917,6 +1004,9 @@ enum PdbPathClass {
     PosixHome,
     Relative,
     WindowsSystem,
+    CiAzureDevOps,
+    CiGitHubActions,
+    CiBuildServer,
     Other,
 }
 
@@ -928,6 +1018,9 @@ impl PdbPathClass {
             PdbPathClass::PosixHome => "posix_home",
             PdbPathClass::Relative => "relative",
             PdbPathClass::WindowsSystem => "windows_system",
+            PdbPathClass::CiAzureDevOps => "ci_azure_devops",
+            PdbPathClass::CiGitHubActions => "ci_github_actions",
+            PdbPathClass::CiBuildServer => "ci_build_server",
             PdbPathClass::Other => "other",
         }
     }
@@ -1006,6 +1099,21 @@ fn classify_pdb_path(path: &str) -> (PdbPathClass, Option<String>) {
         return (PdbPathClass::Relative, None);
     }
 
+    // CI/CD patterns
+    let p_lower = normalized.to_ascii_lowercase();
+    if p_lower.contains("\\agent\\_work\\") || p_lower.contains("\\a\\_work\\") {
+        return (PdbPathClass::CiAzureDevOps, None);
+    }
+    if p_lower.contains("\\actions-runner\\") || p_lower.contains("\\runner\\work\\") || path.contains("/home/runner/work/") {
+        return (PdbPathClass::CiGitHubActions, None);
+    }
+    if p_lower.contains("\\jenkins\\workspace\\") || path.contains("/jenkins/workspace/") {
+        return (PdbPathClass::CiBuildServer, None);
+    }
+    if p_lower.contains("\\buildagent\\work\\") || p_lower.contains("\\teamcity\\") {
+        return (PdbPathClass::CiBuildServer, None);
+    }
+
     if normalized.starts_with("C:\\Windows\\") || normalized.starts_with("C:\\Program Files") {
         return (PdbPathClass::WindowsSystem, None);
     }
@@ -1063,6 +1171,24 @@ fn detect_pdb_opsec(
                         evidence,
                         confidence: 0.9,
                     });
+                    // OPSEC-008: CI/CD path trace
+                    match path_class {
+                        PdbPathClass::CiAzureDevOps | PdbPathClass::CiGitHubActions | PdbPathClass::CiBuildServer => {
+                            let mut ci_ev = BTreeMap::new();
+                            ci_ev.insert("pdb_path".into(), pdb.to_string());
+                            ci_ev.insert("ci_system".into(), path_class.as_str().into());
+                            findings.push(OpsecFinding {
+                                id: "OPSEC-008".into(),
+                                finding_type: "ci_cd_trace".into(),
+                                severity: "info".into(),
+                                source: "debug_directory".into(),
+                                description: format!("PDB path indicates CI/CD build environment ({}): {}", path_class.as_str(), pdb),
+                                evidence: ci_ev,
+                                confidence: 0.85,
+                            });
+                        }
+                        _ => {}
+                    }
                     // Note: OPSEC-001 anomaly is already emitted by detect_anomalies
                 }
             }
@@ -1166,6 +1292,64 @@ fn detect_version_mismatch(
                     description: format!(
                         "Minor filename difference: on-disk '{}' vs OriginalFilename '{}'",
                         on_disk, orig
+                    ),
+                    evidence,
+                    confidence: 0.5,
+                });
+            }
+        }
+    }
+
+    // Check InternalName
+    let internal_name = ver.string_info.iter()
+        .find(|kv| kv.key.eq_ignore_ascii_case("InternalName"))
+        .map(|kv| kv.value.trim().to_string());
+
+    if let Some(ref iname) = internal_name {
+        if !iname.is_empty() {
+            let iname_lower = iname.to_ascii_lowercase();
+            let score = mismatch_score(&on_disk_lower, &iname_lower);
+            if score >= 2 {
+                let mut evidence = BTreeMap::new();
+                evidence.insert("on_disk_name".into(), on_disk.clone());
+                evidence.insert("internal_name".into(), iname.clone());
+                evidence.insert("mismatch_level".into(), "strong".into());
+                findings.push(OpsecFinding {
+                    id: "OPSEC-004".into(),
+                    finding_type: "version_mismatch".into(),
+                    severity: "warning".into(),
+                    source: "version_info".into(),
+                    description: format!(
+                        "Filename mismatch: on-disk '{}' vs InternalName '{}' — possible masquerading",
+                        on_disk, iname
+                    ),
+                    evidence,
+                    confidence: 0.85,
+                });
+                anomalies.push(Anomaly {
+                    rule_id: "OPSEC-004".into(),
+                    category: "OPSEC".into(),
+                    severity: "warning".into(),
+                    description: format!(
+                        "Filename mismatch: on-disk '{}' vs InternalName '{}' — possible masquerading",
+                        on_disk, iname
+                    ),
+                    evidence: Some(format!("on_disk={}, internal_name={}", on_disk, iname)),
+                    threshold: None,
+                });
+            } else if score == 1 {
+                let mut evidence = BTreeMap::new();
+                evidence.insert("on_disk_name".into(), on_disk.clone());
+                evidence.insert("internal_name".into(), iname.clone());
+                evidence.insert("mismatch_level".into(), "weak".into());
+                findings.push(OpsecFinding {
+                    id: "OPSEC-004".into(),
+                    finding_type: "version_mismatch".into(),
+                    severity: "info".into(),
+                    source: "version_info".into(),
+                    description: format!(
+                        "Minor filename difference: on-disk '{}' vs InternalName '{}'",
+                        on_disk, iname
                     ),
                     evidence,
                     confidence: 0.5,
@@ -1557,6 +1741,463 @@ fn build_opsec_summary(findings: &[OpsecFinding]) -> OpsecSummary {
         }.into(),
         types,
     }
+}
+
+// --- .NET metadata parsing ---
+
+fn parse_dotnet(data: &[u8], pe: &PE) -> Option<DotNetInfo> {
+    let opt = pe.header.optional_header.as_ref()?;
+    let (dd14_rva, dd14_size) = match opt.data_directories.data_directories.get(14) {
+        Some(Some((_, dd))) => (dd.virtual_address, dd.size),
+        _ => (0, 0),
+    };
+    if dd14_rva == 0 || dd14_size == 0 {
+        return None;
+    }
+
+    let cor20_offset = rva_to_offset(dd14_rva, pe, data.len())?;
+    if cor20_offset + 72 > data.len() {
+        return None;
+    }
+
+    // Parse IMAGE_COR20_HEADER
+    let _cb = read_u32_le(data, cor20_offset);
+    let major_rt = read_u16_le(data, cor20_offset + 4);
+    let minor_rt = read_u16_le(data, cor20_offset + 6);
+    let meta_rva = read_u32_le(data, cor20_offset + 8);
+    let _meta_size = read_u32_le(data, cor20_offset + 12);
+    let cor_flags = read_u32_le(data, cor20_offset + 16);
+
+    if meta_rva == 0 {
+        return None;
+    }
+
+    let runtime_version = format!("v{}.{}", major_rt, minor_rt);
+
+    let mut flags = Vec::new();
+    if cor_flags & 0x01 != 0 { flags.push("IL_ONLY".into()); }
+    if cor_flags & 0x02 != 0 { flags.push("32BIT_REQUIRED".into()); }
+    if cor_flags & 0x04 != 0 { flags.push("STRONG_NAME_SIGNED".into()); }
+    if cor_flags & 0x10 != 0 { flags.push("NATIVE_ENTRYPOINT".into()); }
+    if cor_flags & 0x10000 != 0 { flags.push("32BIT_PREFERRED".into()); }
+
+    let meta_offset = rva_to_offset(meta_rva, pe, data.len())?;
+    if meta_offset + 16 > data.len() {
+        return None;
+    }
+
+    // Verify BSJB signature
+    let sig = read_u32_le(data, meta_offset);
+    if sig != 0x424A5342 {
+        return None;
+    }
+
+    // Skip MajorVersion(2) + MinorVersion(2) + Reserved(4)
+    let ver_len = read_u32_le(data, meta_offset + 12) as usize;
+    if meta_offset + 16 + ver_len > data.len() {
+        return None;
+    }
+
+    // Read version string (overrides runtime_version)
+    let ver_bytes = &data[meta_offset + 16..meta_offset + 16 + ver_len];
+    let ver_string = String::from_utf8_lossy(ver_bytes)
+        .trim_end_matches('\0')
+        .to_string();
+    let runtime_version = if !ver_string.is_empty() { ver_string } else { runtime_version };
+
+    // After version string: Flags(2) + NumberOfStreams(2)
+    let padded_ver_len = (ver_len + 3) & !3;
+    let streams_offset = meta_offset + 16 + padded_ver_len;
+    if streams_offset + 4 > data.len() {
+        return Some(DotNetInfo {
+            runtime_version,
+            flags,
+            assembly_name: None,
+            assembly_version: None,
+            references: Vec::new(),
+        });
+    }
+
+    let _stream_flags = read_u16_le(data, streams_offset);
+    let num_streams = read_u16_le(data, streams_offset + 2) as usize;
+
+    // Parse stream headers
+    struct StreamInfo {
+        offset: u32,
+        #[allow(dead_code)]
+        size: u32,
+        name: String,
+    }
+    let mut streams = Vec::new();
+    let mut pos = streams_offset + 4;
+    for _ in 0..num_streams {
+        if pos + 8 > data.len() { break; }
+        let s_offset = read_u32_le(data, pos);
+        let s_size = read_u32_le(data, pos + 4);
+        pos += 8;
+        // Read null-terminated name, padded to 4-byte boundary
+        let name_start = pos;
+        while pos < data.len() && data[pos] != 0 {
+            pos += 1;
+        }
+        let name = String::from_utf8_lossy(&data[name_start..pos]).to_string();
+        pos += 1; // skip null
+        pos = (pos + 3) & !3; // pad to 4-byte boundary
+        streams.push(StreamInfo { offset: s_offset, size: s_size, name });
+    }
+
+    // Find #Strings, #~ (or #-) streams
+    let strings_stream = streams.iter().find(|s| s.name == "#Strings");
+    let tilde_stream = streams.iter().find(|s| s.name == "#~" || s.name == "#-");
+
+    let mut assembly_name = None;
+    let mut assembly_version = None;
+    let mut references = Vec::new();
+
+    // Parse #~ stream for Assembly and AssemblyRef tables
+    if let Some(tilde) = tilde_stream {
+        let tilde_abs = meta_offset + tilde.offset as usize;
+        if tilde_abs + 24 <= data.len() {
+            // #~ header: Reserved(4) + MajorVer(1) + MinorVer(1) + HeapSizes(1) + Reserved(1) + Valid(8) + Sorted(8)
+            let heap_sizes = data.get(tilde_abs + 6).copied().unwrap_or(0);
+            let valid_lo = read_u32_le(data, tilde_abs + 8);
+            let valid_hi = read_u32_le(data, tilde_abs + 12);
+            let valid: u64 = (valid_hi as u64) << 32 | valid_lo as u64;
+
+            // Read row counts for each table bit set in Valid
+            let mut row_counts: HashMap<u8, u32> = HashMap::new();
+            let mut rc_pos = tilde_abs + 24;
+            for bit in 0u8..64 {
+                if valid & (1u64 << bit) != 0 {
+                    if rc_pos + 4 > data.len() { break; }
+                    let count = read_u32_le(data, rc_pos);
+                    row_counts.insert(bit, count);
+                    rc_pos += 4;
+                }
+            }
+
+            // Calculate data start (after row counts)
+            let data_start = rc_pos;
+
+            // Calculate row sizes and find offset of Assembly (0x20) and AssemblyRef (0x23)
+            let s_size: usize = if heap_sizes & 0x01 != 0 { 4 } else { 2 };
+            let g_size: usize = if heap_sizes & 0x02 != 0 { 4 } else { 2 };
+            let b_size: usize = if heap_sizes & 0x04 != 0 { 4 } else { 2 };
+
+            let t_size = |table_id: u8| -> usize {
+                if *row_counts.get(&table_id).unwrap_or(&0) > 65535 { 4 } else { 2 }
+            };
+            let c_size = |tag_bits: u32, tables: &[u8]| -> usize {
+                let max_rows = tables.iter()
+                    .map(|t| *row_counts.get(t).unwrap_or(&0))
+                    .max()
+                    .unwrap_or(0);
+                if max_rows < (1u32 << (16 - tag_bits)) { 2 } else { 4 }
+            };
+
+            let calc_row_size = |table_id: u8| -> usize {
+                match table_id {
+                    0x00 => 2 + s_size + g_size + g_size + g_size, // Module
+                    0x01 => c_size(2, &[0x02, 0x01, 0x1B]) + s_size + s_size, // TypeRef
+                    0x02 => 4 + s_size + s_size + c_size(2, &[0x02, 0x01, 0x1B]) + t_size(0x04) + t_size(0x06), // TypeDef
+                    0x04 => 2 + s_size + b_size, // Field
+                    0x06 => 4 + 2 + 2 + s_size + b_size + t_size(0x08), // MethodDef
+                    0x08 => 2 + 2 + s_size, // Param
+                    0x09 => t_size(0x02) + c_size(2, &[0x02, 0x01, 0x1B]), // InterfaceImpl
+                    0x0A => c_size(3, &[0x02, 0x01, 0x1A, 0x06, 0x1B]) + s_size + b_size, // MemberRef
+                    0x0B => 2 + c_size(2, &[0x04, 0x08, 0x17]) + b_size, // Constant
+                    0x0C => c_size(5, &[0x06, 0x04, 0x01, 0x02, 0x08, 0x09, 0x0A, 0x00, 0x0E, 0x17, 0x14, 0x11, 0x1A, 0x1B, 0x20, 0x23, 0x26, 0x27, 0x28, 0x2A, 0x2C, 0x2B]) + c_size(3, &[0x06, 0x0A]) + b_size, // CustomAttribute
+                    0x0D => c_size(1, &[0x04, 0x08]) + b_size, // FieldMarshal
+                    0x0E => 2 + c_size(2, &[0x02, 0x06, 0x20]) + b_size, // DeclSecurity
+                    0x0F => 2 + 4 + t_size(0x02), // ClassLayout
+                    0x10 => 4 + t_size(0x04), // FieldLayout
+                    0x11 => b_size, // StandAloneSig
+                    0x12 => t_size(0x02) + t_size(0x14), // EventMap
+                    0x14 => 2 + s_size + c_size(2, &[0x02, 0x01, 0x1B]), // Event
+                    0x15 => t_size(0x02) + t_size(0x17), // PropertyMap
+                    0x17 => 2 + s_size + b_size, // Property
+                    0x18 => 2 + t_size(0x06) + c_size(1, &[0x14, 0x17]), // MethodSemantics
+                    0x19 => t_size(0x02) + c_size(1, &[0x06, 0x0A]) + c_size(1, &[0x06, 0x0A]), // MethodImpl
+                    0x1A => s_size, // ModuleRef
+                    0x1B => b_size, // TypeSpec
+                    0x1C => 2 + c_size(1, &[0x04, 0x06]) + s_size + t_size(0x1A), // ImplMap
+                    0x1D => 4 + t_size(0x04), // FieldRVA
+                    0x20 => 4 + 2 + 2 + 2 + 2 + 4 + b_size + s_size + s_size, // Assembly
+                    0x21 => 4, // AssemblyProcessor
+                    0x22 => 4 + 4 + 4, // AssemblyOS
+                    0x23 => 2 + 2 + 2 + 2 + 4 + b_size + s_size + s_size + b_size, // AssemblyRef
+                    _ => 0,
+                }
+            };
+
+            // Calculate offset to each table in order
+            let table_order: &[u8] = &[
+                0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+                0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F,
+                0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17,
+                0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F,
+                0x20, 0x21, 0x22, 0x23,
+            ];
+
+            let mut table_offsets: HashMap<u8, usize> = HashMap::new();
+            let mut current_offset = data_start;
+            for &tid in table_order {
+                if valid & (1u64 << tid) != 0 {
+                    table_offsets.insert(tid, current_offset);
+                    let rows = *row_counts.get(&tid).unwrap_or(&0) as usize;
+                    let row_size = calc_row_size(tid);
+                    current_offset += rows * row_size;
+                }
+            }
+
+            // Helper: read a string index from #Strings stream
+            let read_strings_idx = |offset: usize| -> Option<String> {
+                let idx = if s_size == 4 {
+                    read_u32_le(data, offset) as usize
+                } else {
+                    read_u16_le(data, offset) as usize
+                };
+                if let Some(ss) = strings_stream {
+                    let abs = meta_offset + ss.offset as usize + idx;
+                    if abs < data.len() {
+                        let end = data[abs..].iter().position(|&b| b == 0).unwrap_or(0);
+                        let s = String::from_utf8_lossy(&data[abs..abs + end]).to_string();
+                        if !s.is_empty() { return Some(s); }
+                    }
+                }
+                None
+            };
+
+            // Parse Assembly table (0x20)
+            if let Some(&asm_off) = table_offsets.get(&0x20) {
+                if valid & (1u64 << 0x20) != 0 {
+                    // Assembly row: HashAlgId(4) + Major(2) + Minor(2) + Build(2) + Rev(2) + Flags(4) + PublicKey(B) + Name(S) + Culture(S)
+                    let name_offset = asm_off + 4 + 2 + 2 + 2 + 2 + 4 + b_size;
+                    let major = read_u16_le(data, asm_off + 4);
+                    let minor = read_u16_le(data, asm_off + 6);
+                    let build = read_u16_le(data, asm_off + 8);
+                    let rev = read_u16_le(data, asm_off + 10);
+                    assembly_version = Some(format!("{}.{}.{}.{}", major, minor, build, rev));
+                    assembly_name = read_strings_idx(name_offset);
+                }
+            }
+
+            // Parse AssemblyRef table (0x23)
+            if let Some(&aref_off) = table_offsets.get(&0x23) {
+                let aref_rows = *row_counts.get(&0x23).unwrap_or(&0) as usize;
+                let aref_row_size = calc_row_size(0x23);
+                let limit = aref_rows.min(20);
+                for i in 0..limit {
+                    let row_off = aref_off + i * aref_row_size;
+                    // AssemblyRef: Major(2)+Minor(2)+Build(2)+Rev(2)+Flags(4)+PublicKeyOrToken(B)+Name(S)+Culture(S)+HashValue(B)
+                    let ref_major = read_u16_le(data, row_off);
+                    let ref_minor = read_u16_le(data, row_off + 2);
+                    let ref_build = read_u16_le(data, row_off + 4);
+                    let ref_rev = read_u16_le(data, row_off + 6);
+                    let name_offset = row_off + 2 + 2 + 2 + 2 + 4 + b_size;
+                    if let Some(name) = read_strings_idx(name_offset) {
+                        references.push(format!("{} ({}.{}.{}.{})", name, ref_major, ref_minor, ref_build, ref_rev));
+                    }
+                }
+            }
+        }
+    }
+
+    Some(DotNetInfo {
+        runtime_version,
+        flags,
+        assembly_name,
+        assembly_version,
+        references,
+    })
+}
+
+// --- Go detection ---
+
+fn detect_go(data: &[u8], pe: &PE) -> Option<GoInfo> {
+    let mut markers = Vec::new();
+    let mut build_id = None;
+
+    // Check section names for Go-specific sections
+    for section in &pe.sections {
+        let name = String::from_utf8_lossy(&section.name).trim_end_matches('\0').to_string();
+        if name == ".gopclntab" || name == ".go.buildinfo" {
+            markers.push(name);
+        }
+    }
+
+    // Scan for Go build ID marker in raw bytes (limit scan to 8MB)
+    let scan_limit = data.len().min(8 * 1024 * 1024);
+    let scan_data = &data[..scan_limit];
+
+    // Look for "\xff Go build ID: \"" marker
+    let marker_prefix = b"\xff Go build ID: \"";
+    if let Some(pos) = find_bytes(scan_data, marker_prefix) {
+        let start = pos + marker_prefix.len();
+        if let Some(end_off) = scan_data[start..].iter().position(|&b| b == b'"') {
+            let id = String::from_utf8_lossy(&scan_data[start..start + end_off]).to_string();
+            if !id.is_empty() && id.len() < 200 {
+                build_id = Some(id);
+                markers.push("Go build ID".into());
+            }
+        }
+    }
+
+    // Look for other Go runtime markers
+    for marker_str in &[b"runtime.go" as &[u8], b"runtime.cgo", b"GOMAXPROCS"] {
+        if find_bytes(scan_data, marker_str).is_some() {
+            markers.push(String::from_utf8_lossy(marker_str).to_string());
+        }
+    }
+
+    // Require at least 2 markers for confidence
+    if markers.len() < 2 { return None; }
+
+    let confidence = if markers.len() >= 3 { 0.95 } else { 0.8 };
+    Some(GoInfo { build_id, confidence, markers })
+}
+
+fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() || haystack.len() < needle.len() { return None; }
+    haystack.windows(needle.len()).position(|w| w == needle)
+}
+
+// --- Overlay classification ---
+
+fn classify_overlay(data: &[u8], overlay_offset: usize, overlay_size: usize) -> Option<Vec<OverlayClassification>> {
+    if overlay_size == 0 || overlay_offset >= data.len() { return None; }
+    let overlay = &data[overlay_offset..data.len().min(overlay_offset + overlay_size)];
+    if overlay.len() < 4 { return None; }
+
+    let mut results = Vec::new();
+
+    struct Sig { name: &'static str, magic: &'static [u8], confidence: f32 }
+    let sigs: &[Sig] = &[
+        Sig { name: "ZIP", magic: b"PK\x03\x04", confidence: 0.95 },
+        Sig { name: "RAR", magic: b"Rar!\x1a\x07", confidence: 0.95 },
+        Sig { name: "7z", magic: b"7z\xbc\xaf\x27\x1c", confidence: 0.95 },
+        Sig { name: "CAB", magic: b"MSCF", confidence: 0.90 },
+        Sig { name: "PE", magic: b"MZ", confidence: 0.80 },
+        Sig { name: "PDF", magic: b"%PDF", confidence: 0.90 },
+        Sig { name: "GZIP", magic: b"\x1f\x8b", confidence: 0.85 },
+        Sig { name: "XZ", magic: b"\xfd7zXZ\x00", confidence: 0.95 },
+        Sig { name: "NSIS", magic: b"\xef\xbe\xad\xde", confidence: 0.75 },
+    ];
+
+    for sig in sigs {
+        if overlay.len() >= sig.magic.len() && &overlay[..sig.magic.len()] == sig.magic {
+            results.push(OverlayClassification {
+                format: sig.name.to_string(),
+                confidence: sig.confidence,
+            });
+        }
+    }
+
+    if results.is_empty() { None } else { Some(results) }
+}
+
+// --- Build fingerprint ---
+
+fn build_fingerprint(
+    dotnet: &Option<DotNetInfo>,
+    go: &Option<GoInfo>,
+    debug: &Option<DebugInfo>,
+    rich_header: &Option<RichHeaderInfo>,
+    optional_header: &Option<OptionalHeader>,
+    imports: &Option<Vec<ImportEntry>>,
+) -> Option<BuildFingerprint> {
+    // .NET takes priority
+    if let Some(dn) = dotnet {
+        return Some(BuildFingerprint {
+            compiler: ".NET".into(),
+            compiler_version: Some(dn.runtime_version.clone()),
+            is_managed: true,
+            confidence: 0.99,
+            evidence: vec!["CLR header present".into()],
+        });
+    }
+
+    // Go
+    if let Some(go) = go {
+        return Some(BuildFingerprint {
+            compiler: "Go".into(),
+            compiler_version: None,
+            is_managed: false,
+            confidence: go.confidence,
+            evidence: go.markers.clone(),
+        });
+    }
+
+    // Rust detection from PDB path
+    if let Some(dbg) = debug {
+        for entry in &dbg.entries {
+            if let Some(pdb) = &entry.pdb_path {
+                let p = pdb.to_ascii_lowercase();
+                if p.contains("\\target\\debug\\") || p.contains("\\target\\release\\")
+                    || p.contains("/target/debug/") || p.contains("/target/release/") {
+                    return Some(BuildFingerprint {
+                        compiler: "Rust".into(),
+                        compiler_version: None,
+                        is_managed: false,
+                        confidence: 0.75,
+                        evidence: vec![format!("Cargo build path in PDB: {}", pdb)],
+                    });
+                }
+            }
+        }
+    }
+
+    // MSVC from Rich Header
+    if let Some(rich) = rich_header {
+        if !rich.entries.is_empty() {
+            let detail = rich.entries.iter()
+                .filter(|e| e.count > 0)
+                .filter_map(|e| e.description.as_deref())
+                .find(|d| d.contains("[LNK]"))
+                .map(|d| d.to_string());
+            return Some(BuildFingerprint {
+                compiler: "MSVC".into(),
+                compiler_version: detail,
+                is_managed: false,
+                confidence: 0.85,
+                evidence: vec!["Rich Header present".into()],
+            });
+        }
+    }
+
+    // MinGW heuristic: no Rich Header but imports msvcrt.dll/libgcc
+    if rich_header.is_none() {
+        if let Some(imps) = imports {
+            let has_mingw = imps.iter().any(|i| {
+                let dll = i.dll.to_ascii_lowercase();
+                dll.contains("libgcc") || dll.contains("libstdc++") || dll == "msvcrt.dll"
+            });
+            if has_mingw {
+                return Some(BuildFingerprint {
+                    compiler: "MinGW".into(),
+                    compiler_version: None,
+                    is_managed: false,
+                    confidence: 0.6,
+                    evidence: vec!["No Rich Header + MinGW-style imports".into()],
+                });
+            }
+        }
+    }
+
+    // Fallback: linker version from optional header
+    if let Some(opt) = optional_header {
+        if opt.major_linker_version > 0 {
+            return Some(BuildFingerprint {
+                compiler: "Unknown".into(),
+                compiler_version: Some(format!("Linker {}.{}", opt.major_linker_version, opt.minor_linker_version)),
+                is_managed: false,
+                confidence: 0.3,
+                evidence: vec![format!("Linker version {}.{}", opt.major_linker_version, opt.minor_linker_version)],
+            });
+        }
+    }
+
+    None
 }
 
 fn parse_dos_header(data: &[u8]) -> DosHeader {
@@ -2201,12 +2842,14 @@ fn detect_overlay(data: &[u8], pe: &PE) -> OverlayInfo {
             offset: end_of_pe,
             size: data.len() - end_of_pe,
             present: true,
+            classification: None,
         }
     } else {
         OverlayInfo {
             offset: 0,
             size: 0,
             present: false,
+            classification: None,
         }
     }
 }

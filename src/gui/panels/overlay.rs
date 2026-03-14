@@ -38,6 +38,14 @@ pub fn show(ui: &mut Ui, result: &AnalysisResult) {
                 ui.colored_label(LABEL, "Size:");
                 ui.monospace(format!("{} bytes ({:.2} KB)", overlay.size, overlay.size as f64 / 1024.0));
                 ui.end_row();
+
+                if let Some(ref classes) = overlay.classification {
+                    for c in classes {
+                        ui.colored_label(LABEL, "Format:");
+                        ui.monospace(format!("{} (confidence: {:.0}%)", c.format, c.confidence * 100.0));
+                        ui.end_row();
+                    }
+                }
             }
         });
 }

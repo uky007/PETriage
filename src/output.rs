@@ -41,6 +41,21 @@ pub fn format_text(result: &AnalysisResult) -> String {
         out.push('\n');
     }
 
+    if let Some(ref fp) = result.build_fingerprint {
+        out.push_str("=== Build Fingerprint ===\n");
+        out.push_str(&format!("  Compiler:    {} (confidence: {:.0}%)\n", fp.compiler, fp.confidence * 100.0));
+        if let Some(ref ver) = fp.compiler_version {
+            out.push_str(&format!("  Version:     {}\n", ver));
+        }
+        if fp.is_managed {
+            out.push_str("  Managed:     Yes\n");
+        }
+        for ev in &fp.evidence {
+            out.push_str(&format!("  Evidence:    {}\n", ev));
+        }
+        out.push('\n');
+    }
+
     // OPSEC Analysis section (structured findings)
     if let Some(ref opsec) = result.opsec {
         out.push_str(&format!("{}\n", "=== OPSEC Analysis ===".yellow().bold()));
@@ -251,6 +266,11 @@ pub fn format_text(result: &AnalysisResult) -> String {
             out.push_str("  Present:  Yes\n");
             out.push_str(&format!("  Offset:   {:#x}\n", overlay.offset));
             out.push_str(&format!("  Size:     {} bytes ({:.2} KB)\n", overlay.size, overlay.size as f64 / 1024.0));
+            if let Some(ref classes) = overlay.classification {
+                for c in classes {
+                    out.push_str(&format!("  Format:   {} (confidence: {:.0}%)\n", c.format, c.confidence * 100.0));
+                }
+            }
         } else {
             out.push_str("  Present:  No\n");
         }
@@ -312,6 +332,37 @@ pub fn format_text(result: &AnalysisResult) -> String {
                 out.push_str(&format!("      PDB:             {}\n", pdb.yellow().bold()));
             }
         }
+        out.push('\n');
+    }
+
+    if let Some(ref dn) = result.dotnet {
+        out.push_str("=== .NET Metadata ===\n");
+        out.push_str(&format!("  Runtime:     {}\n", dn.runtime_version));
+        if let Some(ref name) = dn.assembly_name {
+            out.push_str(&format!("  Assembly:    {}\n", name));
+        }
+        if let Some(ref ver) = dn.assembly_version {
+            out.push_str(&format!("  Version:     {}\n", ver));
+        }
+        if !dn.flags.is_empty() {
+            out.push_str(&format!("  Flags:       {}\n", dn.flags.join(", ")));
+        }
+        if !dn.references.is_empty() {
+            out.push_str(&format!("  References ({}):\n", dn.references.len()));
+            for r in &dn.references {
+                out.push_str(&format!("    - {}\n", r));
+            }
+        }
+        out.push('\n');
+    }
+
+    if let Some(ref go) = result.go {
+        out.push_str("=== Go Build Info ===\n");
+        if let Some(ref bid) = go.build_id {
+            out.push_str(&format!("  Build ID:    {}\n", bid));
+        }
+        out.push_str(&format!("  Confidence:  {:.0}%\n", go.confidence * 100.0));
+        out.push_str(&format!("  Markers:     {}\n", go.markers.join(", ")));
         out.push('\n');
     }
 
