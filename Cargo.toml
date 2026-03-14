@@ -7,7 +7,7 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/uky007/petriage"
 homepage = "https://github.com/uky007/petriage"
 documentation = "https://docs.rs/petriage"
-exclude = ["CLAUDE.md", "feature_scope.md", "notes/"]
+exclude = ["CLAUDE.md", "notes/"]
 build = "build.rs"
 
 [[bin]]
