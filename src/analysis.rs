@@ -1071,6 +1071,25 @@ fn detect_opsec(
 fn classify_pdb_path(path: &str) -> (PdbPathClass, Option<String>) {
     let normalized = path.replace('/', "\\");
 
+    // CI/CD patterns checked FIRST — more specific than user profile patterns.
+    // Self-hosted runners often use C:\Users\runneradmin\... or /home/jenkins/...
+    // which would otherwise match the generic user profile patterns.
+    let p_lower = normalized.to_ascii_lowercase();
+    if p_lower.contains("\\agent\\_work\\") || p_lower.contains("\\a\\_work\\") {
+        return (PdbPathClass::CiAzureDevOps, None);
+    }
+    if p_lower.contains("\\actions-runner\\") || p_lower.contains("\\runner\\work\\")
+        || p_lower.contains("\\actions\\runner\\") || path.contains("/home/runner/work/") {
+        return (PdbPathClass::CiGitHubActions, None);
+    }
+    if p_lower.contains("\\jenkins\\workspace\\") || p_lower.contains("/jenkins/")
+        || path.contains("/workspace/") && path.contains("jenkins") {
+        return (PdbPathClass::CiBuildServer, None);
+    }
+    if p_lower.contains("\\buildagent\\work\\") || p_lower.contains("\\teamcity\\") {
+        return (PdbPathClass::CiBuildServer, None);
+    }
+
     // Windows user profile: C:\Users\<name>\...
     let user_prefix = ["C:\\Users\\", "D:\\Users\\", "E:\\Users\\"];
     for prefix in &user_prefix {
@@ -1097,21 +1116,6 @@ fn classify_pdb_path(path: &str) -> (PdbPathClass, Option<String>) {
     if path.starts_with(".\\") || path.starts_with("./")
         || path.starts_with("..\\") || path.starts_with("../") {
         return (PdbPathClass::Relative, None);
-    }
-
-    // CI/CD patterns
-    let p_lower = normalized.to_ascii_lowercase();
-    if p_lower.contains("\\agent\\_work\\") || p_lower.contains("\\a\\_work\\") {
-        return (PdbPathClass::CiAzureDevOps, None);
-    }
-    if p_lower.contains("\\actions-runner\\") || p_lower.contains("\\runner\\work\\") || path.contains("/home/runner/work/") {
-        return (PdbPathClass::CiGitHubActions, None);
-    }
-    if p_lower.contains("\\jenkins\\workspace\\") || path.contains("/jenkins/workspace/") {
-        return (PdbPathClass::CiBuildServer, None);
-    }
-    if p_lower.contains("\\buildagent\\work\\") || p_lower.contains("\\teamcity\\") {
-        return (PdbPathClass::CiBuildServer, None);
     }
 
     if normalized.starts_with("C:\\Windows\\") || normalized.starts_with("C:\\Program Files") {
@@ -1900,8 +1904,11 @@ fn parse_dotnet(data: &[u8], pe: &PE) -> Option<DotNetInfo> {
                     0x00 => 2 + s_size + g_size + g_size + g_size, // Module
                     0x01 => c_size(2, &[0x02, 0x01, 0x1B]) + s_size + s_size, // TypeRef
                     0x02 => 4 + s_size + s_size + c_size(2, &[0x02, 0x01, 0x1B]) + t_size(0x04) + t_size(0x06), // TypeDef
+                    0x03 => t_size(0x04), // FieldPtr
                     0x04 => 2 + s_size + b_size, // Field
+                    0x05 => t_size(0x06), // MethodPtr
                     0x06 => 4 + 2 + 2 + s_size + b_size + t_size(0x08), // MethodDef
+                    0x07 => t_size(0x08), // ParamPtr
                     0x08 => 2 + 2 + s_size, // Param
                     0x09 => t_size(0x02) + c_size(2, &[0x02, 0x01, 0x1B]), // InterfaceImpl
                     0x0A => c_size(3, &[0x02, 0x01, 0x1A, 0x06, 0x1B]) + s_size + b_size, // MemberRef
@@ -1913,8 +1920,10 @@ fn parse_dotnet(data: &[u8], pe: &PE) -> Option<DotNetInfo> {
                     0x10 => 4 + t_size(0x04), // FieldLayout
                     0x11 => b_size, // StandAloneSig
                     0x12 => t_size(0x02) + t_size(0x14), // EventMap
+                    0x13 => t_size(0x14), // EventPtr
                     0x14 => 2 + s_size + c_size(2, &[0x02, 0x01, 0x1B]), // Event
                     0x15 => t_size(0x02) + t_size(0x17), // PropertyMap
+                    0x16 => t_size(0x17), // PropertyPtr
                     0x17 => 2 + s_size + b_size, // Property
                     0x18 => 2 + t_size(0x06) + c_size(1, &[0x14, 0x17]), // MethodSemantics
                     0x19 => t_size(0x02) + c_size(1, &[0x06, 0x0A]) + c_size(1, &[0x06, 0x0A]), // MethodImpl
@@ -2050,8 +2059,12 @@ fn detect_go(data: &[u8], pe: &PE) -> Option<GoInfo> {
         }
     }
 
-    // Require at least 2 markers for confidence
-    if markers.len() < 2 { return None; }
+    // Require at least 2 markers AND at least 1 structural marker
+    // (section name or build ID) to avoid false positives from string-only matches.
+    let has_structural = markers.iter().any(|m| {
+        m == ".gopclntab" || m == ".go.buildinfo" || m == "Go build ID"
+    });
+    if markers.len() < 2 || !has_structural { return None; }
 
     let confidence = if markers.len() >= 3 { 0.95 } else { 0.8 };
     Some(GoInfo { build_id, confidence, markers })
@@ -2830,6 +2843,8 @@ fn compute_imphash(pe: &PE) -> Option<String> {
 }
 
 fn detect_overlay(data: &[u8], pe: &PE) -> OverlayInfo {
+    let no_overlay = OverlayInfo { offset: 0, size: 0, present: false, classification: None };
+
     // The overlay starts after the last section's raw data
     let end_of_pe = pe.sections.iter()
         .filter_map(|s| s.pointer_to_raw_data.checked_add(s.size_of_raw_data))
@@ -2837,20 +2852,37 @@ fn detect_overlay(data: &[u8], pe: &PE) -> OverlayInfo {
         .max()
         .unwrap_or(0);
 
-    if end_of_pe < data.len() && end_of_pe > 0 {
-        OverlayInfo {
-            offset: end_of_pe,
-            size: data.len() - end_of_pe,
-            present: true,
-            classification: None,
+    if end_of_pe >= data.len() || end_of_pe == 0 {
+        return no_overlay;
+    }
+
+    // Exclude the certificate table (Data Directory 4) from the overlay region.
+    // The certificate table sits after sections but is not overlay data.
+    let cert_covers_tail = if let Some(opt) = pe.header.optional_header.as_ref() {
+        match opt.data_directories.data_directories.get(4) {
+            Some(Some((_, dd))) if dd.virtual_address > 0 && dd.size > 0 => {
+                let cert_start = dd.virtual_address as usize;
+                let cert_end = cert_start.saturating_add(dd.size as usize);
+                // Certificate table uses file offsets (not RVA), and typically
+                // starts at or after end_of_pe. If it covers the entire tail,
+                // there is no real overlay.
+                cert_start <= end_of_pe && cert_end >= data.len()
+            }
+            _ => false,
         }
     } else {
-        OverlayInfo {
-            offset: 0,
-            size: 0,
-            present: false,
-            classification: None,
-        }
+        false
+    };
+
+    if cert_covers_tail {
+        return no_overlay;
+    }
+
+    OverlayInfo {
+        offset: end_of_pe,
+        size: data.len() - end_of_pe,
+        present: true,
+        classification: None,
     }
 }
 

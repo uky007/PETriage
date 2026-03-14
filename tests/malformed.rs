@@ -2671,3 +2671,73 @@ fn no_panic_dotnet_truncated_metadata() {
     let output = petriage_run_with_args(&data, &["--json"]);
     assert_no_panic(&output);
 }
+
+// ========================================================================
+// Regression tests for v0.4.0 review findings
+// ========================================================================
+
+#[test]
+fn signed_pe_no_overlay_false_positive() {
+    // A PE with a certificate table should NOT trigger STRUCT-002 (overlay detected).
+    // The certificate table sits after sections but is not overlay data.
+    let data = build_pe_with_valid_authenticode();
+    let output = petriage_run_with_args(&data, &["--json"]);
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let val: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let anomalies = val["anomalies"].as_array().unwrap();
+    let overlay_anomaly = anomalies.iter()
+        .find(|a| a["rule_id"] == "STRUCT-002");
+    assert!(overlay_anomaly.is_none(),
+        "STRUCT-002 should not fire for signed PE with certificate table, anomalies: {:?}", anomalies);
+}
+
+#[test]
+fn go_detection_requires_structural_marker() {
+    // Two string-only markers (runtime.go + GOMAXPROCS) without any structural
+    // marker (section name or build ID) should NOT detect Go.
+    let data = build_pe_with_strings(&[
+        "runtime.go",
+        "GOMAXPROCS",
+        "some other string",
+    ]);
+    let output = petriage_run_with_args(&data, &["--json", "-a"]);
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let val: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert!(val.get("go").is_none(),
+        "Go should not be detected with only string markers (no structural marker)");
+}
+
+#[test]
+fn cicd_path_detected_under_user_profile() {
+    // CI/CD paths like C:\Users\runneradmin\actions-runner\_work\... should be
+    // classified as CI (not WindowsUserProfile) because CI patterns are checked first.
+    let pdb = r"C:\Users\runneradmin\actions-runner\_work\proj\test.pdb";
+    let data = build_pe_with_pdb_path(pdb);
+    let output = petriage_run_with_args(&data, &["--json"]);
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let val: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let opsec = val.get("opsec").expect("should have opsec");
+    let findings = opsec["findings"].as_array().unwrap();
+    let ci = findings.iter().find(|f| f["id"] == "OPSEC-008");
+    assert!(ci.is_some(),
+        "OPSEC-008 should fire for CI path under C:\\Users, findings: {:?}", findings);
+}
+
+#[test]
+fn cicd_path_jenkins_under_home() {
+    // /home/jenkins/workspace/project/build/test.pdb should be CI, not PosixHome
+    let pdb = "/home/jenkins/workspace/project/build/test.pdb";
+    let data = build_pe_with_pdb_path(pdb);
+    let output = petriage_run_with_args(&data, &["--json"]);
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let val: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let opsec = val.get("opsec").expect("should have opsec");
+    let findings = opsec["findings"].as_array().unwrap();
+    let ci = findings.iter().find(|f| f["id"] == "OPSEC-008");
+    assert!(ci.is_some(),
+        "OPSEC-008 should fire for Jenkins path under /home, findings: {:?}", findings);
+}
