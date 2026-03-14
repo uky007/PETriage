@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="PETriage.png" alt="PETriage" width="600">
+  <img src="images/PETriage.png" alt="PETriage" width="600">
 </p>
 
 # PETriage
@@ -74,11 +74,11 @@ See [docs/usage.md](docs/usage.md) for full CLI options, `jq` recipes, TUI/GUI d
 
 ### CLI
 
-![PETriage CLI](petriage_cui_v0.1.0.png)
+![PETriage CLI](images/petriage_cui_v0.1.0.png)
 
 ### GUI
 
-![PETriage GUI](petriage_gui_v0.1.0.png)
+![PETriage GUI](images/petriage_gui_v0.1.0.png)
 
 ## Exit Codes
 
