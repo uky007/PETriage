@@ -2799,17 +2799,14 @@ fn packer_single_section_no_score_inflation() {
     assert_eq!(output.status.code(), Some(0));
     let stdout = String::from_utf8_lossy(&output.stdout);
     let val: serde_json::Value = serde_json::from_str(&stdout).unwrap();
-    if let Some(fp) = val.get("build_fingerprint") {
-        if let Some(pk) = fp.get("packer") {
-            let evidence = pk["evidence"].as_array().unwrap();
-            assert_eq!(evidence.len(), 1,
-                "single section should produce 1 evidence, got: {:?}", evidence);
-            // Confidence should be 0.45 base (single section, no corroboration)
-            let conf = pk["confidence"].as_f64().unwrap();
-            assert!(conf <= 0.55,
-                "single spoofable section should have low confidence, got: {}", conf);
-        }
-    }
+    let fp = val.get("build_fingerprint").expect("should have build_fingerprint");
+    let pk = fp.get("packer").expect("should detect packer for .themida section");
+    let evidence = pk["evidence"].as_array().unwrap();
+    assert_eq!(evidence.len(), 1,
+        "single section should produce 1 evidence, got: {:?}", evidence);
+    let conf = pk["confidence"].as_f64().unwrap();
+    assert!(conf <= 0.55,
+        "single spoofable section should have low confidence, got: {}", conf);
 }
 
 #[test]
@@ -2835,11 +2832,9 @@ fn packer_pecompact_single_section_no_dedup_inflation() {
     assert_eq!(output.status.code(), Some(0));
     let stdout = String::from_utf8_lossy(&output.stdout);
     let val: serde_json::Value = serde_json::from_str(&stdout).unwrap();
-    if let Some(fp) = val.get("build_fingerprint") {
-        if let Some(pk) = fp.get("packer") {
-            let evidence = pk["evidence"].as_array().unwrap();
-            assert_eq!(evidence.len(), 1,
-                "PEC2 single section should produce 1 evidence, got: {:?}", evidence);
-        }
-    }
+    let fp = val.get("build_fingerprint").expect("should have build_fingerprint");
+    let pk = fp.get("packer").expect("should detect packer for PEC2 section");
+    let evidence = pk["evidence"].as_array().unwrap();
+    assert_eq!(evidence.len(), 1,
+        "PEC2 single section should produce 1 evidence, got: {:?}", evidence);
 }
