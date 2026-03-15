@@ -460,33 +460,37 @@ impl eframe::App for ReadpeApp {
                             }
                         }
 
-                        // Tab bar
+                        // Tab bar (horizontally scrollable)
                         egui::Frame::new()
                             .fill(BG_HEADER)
                             .inner_margin(Margin::symmetric(8, 0))
                             .stroke(Stroke::new(1.0, BORDER))
                             .show(ui, |ui| {
-                                ui.horizontal(|ui| {
-                                    ui.add_space(4.0);
-                                    for tab in Tab::ALL {
-                                        let selected = self.current_tab == *tab;
-                                        let text = egui::RichText::new(tab.label())
-                                            .color(if selected { ACCENT } else { TEXT_DIM });
-                                        let btn = egui::Button::new(text)
-                                            .fill(if selected { BG_DARK } else { Color32::TRANSPARENT })
-                                            .stroke(if selected {
-                                                Stroke::new(1.0, ACCENT_DIM)
-                                            } else {
-                                                Stroke::NONE
-                                            })
-                                            .corner_radius(CornerRadius {
-                                                nw: 4, ne: 4, sw: 0, se: 0,
-                                            });
-                                        if ui.add(btn).clicked() {
-                                            self.current_tab = *tab;
-                                        }
-                                    }
-                                });
+                                egui::ScrollArea::horizontal()
+                                    .auto_shrink([false, true])
+                                    .show(ui, |ui| {
+                                        ui.horizontal(|ui| {
+                                            ui.add_space(4.0);
+                                            for tab in Tab::ALL {
+                                                let selected = self.current_tab == *tab;
+                                                let text = egui::RichText::new(tab.label())
+                                                    .color(if selected { ACCENT } else { TEXT_DIM });
+                                                let btn = egui::Button::new(text)
+                                                    .fill(if selected { BG_DARK } else { Color32::TRANSPARENT })
+                                                    .stroke(if selected {
+                                                        Stroke::new(1.0, ACCENT_DIM)
+                                                    } else {
+                                                        Stroke::NONE
+                                                    })
+                                                    .corner_radius(CornerRadius {
+                                                        nw: 4, ne: 4, sw: 0, se: 0,
+                                                    });
+                                                if ui.add(btn).clicked() {
+                                                    self.current_tab = *tab;
+                                                }
+                                            }
+                                        });
+                                    });
                             });
 
                         // Clone result for panels that need mutable self
