@@ -2741,3 +2741,105 @@ fn cicd_path_jenkins_under_home() {
     assert!(ci.is_some(),
         "OPSEC-008 should fire for Jenkins path under /home, findings: {:?}", findings);
 }
+
+// ========================================================================
+// Packer detection regression tests
+// ========================================================================
+
+/// Build a PE with custom section names
+fn build_pe_with_sections(names: &[&str]) -> Vec<u8> {
+    let num_sections = names.len().min(8) as u16;
+    let mut data = vec![0u8; 0x1000];
+
+    // DOS header
+    data[0] = b'M'; data[1] = b'Z';
+    data[0x3C..0x40].copy_from_slice(&0x80u32.to_le_bytes());
+
+    // PE signature
+    data[0x80] = b'P'; data[0x81] = b'E';
+
+    // COFF header at 0x84
+    data[0x84..0x86].copy_from_slice(&0x014Cu16.to_le_bytes());
+    data[0x86..0x88].copy_from_slice(&num_sections.to_le_bytes());
+    data[0x94..0x96].copy_from_slice(&0xE0u16.to_le_bytes());
+    data[0x96..0x98].copy_from_slice(&0x0102u16.to_le_bytes());
+
+    // Optional header at 0x98
+    data[0x98..0x9A].copy_from_slice(&0x010Bu16.to_le_bytes());
+    data[0xB4..0xB8].copy_from_slice(&0x400000u32.to_le_bytes());
+    data[0xB8..0xBC].copy_from_slice(&0x1000u32.to_le_bytes());
+    data[0xBC..0xC0].copy_from_slice(&0x200u32.to_le_bytes());
+    data[0xD0..0xD4].copy_from_slice(&0x10000u32.to_le_bytes());
+    data[0xD4..0xD8].copy_from_slice(&0x200u32.to_le_bytes());
+    data[0xF4..0xF8].copy_from_slice(&16u32.to_le_bytes());
+
+    // Section headers at 0x178
+    for (i, name) in names.iter().enumerate().take(8) {
+        let sh = 0x178 + i * 40;
+        let name_bytes = name.as_bytes();
+        let copy_len = name_bytes.len().min(8);
+        data[sh..sh + copy_len].copy_from_slice(&name_bytes[..copy_len]);
+        let rva = (0x1000 + i * 0x1000) as u32;
+        data[sh + 8..sh + 12].copy_from_slice(&0x200u32.to_le_bytes());
+        data[sh + 12..sh + 16].copy_from_slice(&rva.to_le_bytes());
+        data[sh + 16..sh + 20].copy_from_slice(&0x200u32.to_le_bytes());
+        data[sh + 20..sh + 24].copy_from_slice(&(0x200 + i as u32 * 0x200).to_le_bytes());
+        data[sh + 36..sh + 40].copy_from_slice(&0x60000020u32.to_le_bytes());
+    }
+
+    data
+}
+
+#[test]
+fn packer_single_section_no_score_inflation() {
+    // A PE with only ".themida" should NOT have matched.len() >= 2
+    // (case-variant dedup must prevent inflation)
+    let data = build_pe_with_sections(&[".themida"]);
+    let output = petriage_run_with_args(&data, &["--json"]);
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let val: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    if let Some(fp) = val.get("build_fingerprint") {
+        if let Some(pk) = fp.get("packer") {
+            let evidence = pk["evidence"].as_array().unwrap();
+            assert_eq!(evidence.len(), 1,
+                "single section should produce 1 evidence, got: {:?}", evidence);
+            // Confidence should be 0.45 base (single section, no corroboration)
+            let conf = pk["confidence"].as_f64().unwrap();
+            assert!(conf <= 0.55,
+                "single spoofable section should have low confidence, got: {}", conf);
+        }
+    }
+}
+
+#[test]
+fn packer_upx_detection_with_anomaly_corroboration() {
+    // UPX with both sections should have high confidence
+    let data = build_pe_with_sections(&["UPX0", "UPX1"]);
+    let output = petriage_run_with_args(&data, &["--json"]);
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let val: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let fp = val.get("build_fingerprint").expect("should have build_fingerprint");
+    let pk = fp.get("packer").expect("should detect packer");
+    assert_eq!(pk["name"].as_str(), Some("UPX"));
+    let conf = pk["confidence"].as_f64().unwrap();
+    assert!(conf >= 0.60, "UPX with 2 sections should be >= 0.60, got: {}", conf);
+}
+
+#[test]
+fn packer_pecompact_single_section_no_dedup_inflation() {
+    // PEC2 alone should match once, not twice (pec2+PEC2 case dedup)
+    let data = build_pe_with_sections(&["PEC2"]);
+    let output = petriage_run_with_args(&data, &["--json"]);
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let val: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    if let Some(fp) = val.get("build_fingerprint") {
+        if let Some(pk) = fp.get("packer") {
+            let evidence = pk["evidence"].as_array().unwrap();
+            assert_eq!(evidence.len(), 1,
+                "PEC2 single section should produce 1 evidence, got: {:?}", evidence);
+        }
+    }
+}

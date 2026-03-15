@@ -2471,26 +2471,36 @@ fn detect_packer(pe: &PE, data: &[u8], overlay_offset: Option<usize>,
         }
     }
 
+    // Helper: match patterns against sections, dedup by actual section name matched
+    // (avoids case-variant patterns inflating matched count)
+    let match_sections = |patterns: &[&str]| -> Vec<String> {
+        let mut matched_names: Vec<String> = Vec::new();
+        for sec in &section_names {
+            let sec_lower = sec.to_ascii_lowercase();
+            if patterns.iter().any(|pat| pat.to_ascii_lowercase() == sec_lower)
+                && !matched_names.iter().any(|m: &String| m.to_ascii_lowercase() == sec_lower) {
+                matched_names.push(sec.clone());
+            }
+        }
+        matched_names
+    };
+
     // --- Spoofable protectors (Tier B: medium confidence, require corroboration for high) ---
     struct ProtectorSig { name: &'static str, patterns: &'static [&'static str] }
     let protectors = [
-        ProtectorSig { name: "Themida/WinLicense", patterns: &["Themida", ".Themida", ".themida", "WinLicen", ".winlice"] },
+        ProtectorSig { name: "Themida/WinLicense", patterns: &["Themida", ".Themida", "WinLicen", ".winlice"] },
         ProtectorSig { name: "VMProtect", patterns: &[".vmp0", ".vmp1", ".vmp2"] },
         ProtectorSig { name: "Enigma Protector", patterns: &[".enigma1", ".enigma2"] },
     ];
     for p in &protectors {
-        let matched: Vec<String> = p.patterns.iter()
-            .filter(|pat| has_section(pat))
-            .map(|s| format!("section: {}", s))
-            .collect();
+        let matched = match_sections(p.patterns);
         if !matched.is_empty() {
-            // Section name only = 0.45 (medium); corroboration can push higher
             let mut score = if matched.len() >= 2 { 0.55f32 } else { 0.45 };
             corroboration_bonus(&mut score);
             return Some(PackerInfo {
                 name: p.name.into(),
                 confidence: score.min(1.0),
-                evidence: matched,
+                evidence: matched.iter().map(|s| format!("section: {}", s)).collect(),
             });
         }
     }
@@ -2498,24 +2508,21 @@ fn detect_packer(pe: &PE, data: &[u8], overlay_offset: Option<usize>,
     // --- Other packers (section-name based, non-spoofable names) ---
     struct SimpleSig { name: &'static str, patterns: &'static [&'static str] }
     let simple_packers = [
-        SimpleSig { name: "PECompact", patterns: &["pec1", "pec2", "PEC2", "PEC2MO", "PEC2TO", "PECompact2"] },
+        SimpleSig { name: "PECompact", patterns: &["pec1", "pec2", "PEC2MO", "PEC2TO", "PECompact2"] },
         SimpleSig { name: "NSPack", patterns: &[".nsp0", ".nsp1", ".nsp2", "nsp0", "nsp1", "nsp2"] },
         SimpleSig { name: "Petite", patterns: &[".petite"] },
         SimpleSig { name: "Upack", patterns: &[".Upack", ".ByDwing"] },
         SimpleSig { name: "RLPack", patterns: &[".RLPack"] },
     ];
     for p in &simple_packers {
-        let matched: Vec<String> = p.patterns.iter()
-            .filter(|pat| has_section(pat))
-            .map(|s| format!("section: {}", s))
-            .collect();
+        let matched = match_sections(p.patterns);
         if !matched.is_empty() {
             let mut score = if matched.len() >= 2 { 0.65f32 } else { 0.50 };
             corroboration_bonus(&mut score);
             return Some(PackerInfo {
                 name: p.name.into(),
                 confidence: score.min(1.0),
-                evidence: matched,
+                evidence: matched.iter().map(|s| format!("section: {}", s)).collect(),
             });
         }
     }
