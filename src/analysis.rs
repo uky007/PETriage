@@ -1061,6 +1061,7 @@ fn detect_opsec(
     if let Some(strings) = strings {
         detect_credentials(strings, &mut findings, &mut anomalies);
         detect_endpoints(strings, &mut findings, &mut anomalies);
+        detect_source_path_leaks(strings, &mut findings);
     }
     detect_rich_opsec(rich_header, &mut findings);
 
@@ -1585,6 +1586,11 @@ fn detect_endpoints(
             if count >= MAX_ENDPOINT_FINDINGS { break; }
             let url = m.as_str();
             if !seen_urls.insert(url.to_string()) { continue; }
+            // Skip regex patterns embedded in binaries (contain metacharacters)
+            if url.contains("(.") || url.contains("(?") || url.contains("[^")
+                || url.contains("\\d") || url.contains("\\w") || url.ends_with('$') {
+                continue;
+            }
 
             let is_internal = url.contains("localhost")
                 || url.contains("127.0.0.1")
@@ -1658,6 +1664,58 @@ fn detect_endpoints(
                     });
                 }
                 count += 1;
+            }
+        }
+    }
+}
+
+fn detect_source_path_leaks(
+    strings: &[StringEntry],
+    findings: &mut Vec<OpsecFinding>,
+) {
+    let mut seen_users: HashSet<String> = HashSet::new();
+
+    // Patterns for source/build paths that leak usernames.
+    // Common in Go (embeds full source paths), Rust, and debug builds.
+    let user_path_prefixes: &[(&str, &str)] = &[
+        ("c:/users/", "windows"),
+        ("c:\\users\\", "windows"),
+        ("d:/users/", "windows"),
+        ("d:\\users\\", "windows"),
+        ("/home/", "posix"),
+        ("/users/", "macos"),
+    ];
+
+    for s in strings {
+        let lower = s.value.to_ascii_lowercase();
+        for &(prefix, os_hint) in user_path_prefixes {
+            if let Some(rest) = lower.strip_prefix(prefix) {
+                let user = rest.split(['/', '\\']).next().unwrap_or("");
+                if user.is_empty() || seen_users.contains(user) { continue; }
+                // Skip generic/system users
+                if matches!(user, "public" | "default" | "all users" | "administrator") {
+                    continue;
+                }
+                seen_users.insert(user.to_string());
+
+                let mut evidence = BTreeMap::new();
+                evidence.insert("username".into(), user.to_string());
+                evidence.insert("os_hint".into(), os_hint.into());
+                evidence.insert("sample_path".into(), s.value.clone());
+                evidence.insert("offset".into(), format!("{:#x}", s.offset));
+
+                findings.push(OpsecFinding {
+                    id: "OPSEC-009".into(),
+                    finding_type: "source_path_leak".into(),
+                    severity: "warning".into(),
+                    source: "strings".into(),
+                    description: format!(
+                        "Source/build path leaks username '{}' ({})",
+                        user, os_hint
+                    ),
+                    evidence,
+                    confidence: 0.85,
+                });
             }
         }
     }

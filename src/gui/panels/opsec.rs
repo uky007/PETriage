@@ -65,7 +65,8 @@ pub fn show(ui: &mut Ui, result: &AnalysisResult) {
 
     // Individual findings grouped by type
     let type_order = ["pdb_path", "nulled_pdb", "version_mismatch", "vendor_mismatch",
-                      "credential", "endpoint", "rich_header"];
+                      "credential", "endpoint", "source_path_leak", "ci_cd_trace",
+                      "rich_header"];
 
     for finding_type in &type_order {
         let group: Vec<_> = opsec.findings.iter()
@@ -81,6 +82,8 @@ pub fn show(ui: &mut Ui, result: &AnalysisResult) {
             "credential" => "Credential Patterns",
             "endpoint" => "Network Endpoints",
             "rich_header" => "Rich Header Integrity",
+            "source_path_leak" => "Source Path Username Leak",
+            "ci_cd_trace" => "CI/CD Build Trace",
             other => other,
         };
 
