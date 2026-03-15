@@ -540,7 +540,7 @@ pub fn analyze(data: &[u8], pe: &PE, opts: &AnalysisOptions) -> AnalysisResult {
     let strings_for_opsec = opsec_strings.as_ref().or(display_strings.as_ref());
     let (opsec_info, opsec_anomalies) = detect_opsec(
         &file_info, &debug, &resources_parsed, &rich_header_parsed,
-        &authenticode, strings_for_opsec,
+        &authenticode, strings_for_opsec, data,
     );
     anomalies_vec.extend(opsec_anomalies);
 
@@ -1078,6 +1078,7 @@ fn detect_opsec(
     rich_header: &Option<RichHeaderInfo>,
     authenticode: &Option<AuthenticodeInfo>,
     strings: Option<&Vec<StringEntry>>,
+    data: &[u8],
 ) -> (OpsecInfo, Vec<Anomaly>) {
     let mut findings = Vec::new();
     let mut anomalies = Vec::new();
@@ -1089,6 +1090,8 @@ fn detect_opsec(
         detect_endpoints(strings, &mut findings, &mut anomalies);
         detect_source_path_leaks(strings, &mut findings);
     }
+    // Always scan raw bytes for source path leaks (works without -a/--opsec-strict)
+    detect_source_path_leaks_raw(data, &mut findings);
     detect_rich_opsec(rich_header, &mut findings);
 
     let summary = build_opsec_summary(&findings);
@@ -1752,6 +1755,95 @@ fn detect_source_path_leaks(
                     confidence: 0.85,
                 });
             }
+        }
+    }
+}
+
+/// Scan raw PE bytes for source path leaks without requiring string extraction.
+/// Detects patterns like C:/Users/<name>/ and /home/<name>/ directly in binary data.
+fn detect_source_path_leaks_raw(
+    data: &[u8],
+    findings: &mut Vec<OpsecFinding>,
+) {
+    let mut seen_users: HashSet<String> = HashSet::new();
+    // Collect users already found by string-based detection to avoid duplicates
+    for f in findings.iter() {
+        if f.finding_type == "source_path_leak" {
+            if let Some(user) = f.evidence.get("username") {
+                seen_users.insert(user.to_ascii_lowercase());
+            }
+        }
+    }
+
+    let markers: &[&[u8]] = &[
+        b"C:/Users/", b"C:\\Users\\",
+        b"D:/Users/", b"D:\\Users\\",
+        b"/home/",
+    ];
+
+    let scan_limit = data.len().min(16 * 1024 * 1024);
+    let scan_data = &data[..scan_limit];
+
+    for marker in markers {
+        let mut pos = 0;
+        while pos + marker.len() < scan_data.len() {
+            let haystack = &scan_data[pos..];
+            let found = match find_bytes(haystack, marker) {
+                Some(off) => off,
+                None => break,
+            };
+            let abs_pos = pos + found + marker.len();
+            pos = abs_pos;
+
+            // Extract username: read printable ASCII until / or \ or non-printable
+            let user_start = abs_pos;
+            let mut user_end = user_start;
+            while user_end < scan_data.len() && user_end - user_start < 64 {
+                let b = scan_data[user_end];
+                if b == b'/' || b == b'\\' || b < 0x20 || b > 0x7e {
+                    break;
+                }
+                user_end += 1;
+            }
+            if user_end == user_start { continue; }
+
+            let user = String::from_utf8_lossy(&scan_data[user_start..user_end]).to_string();
+            let user_lower = user.to_ascii_lowercase();
+            if matches!(user_lower.as_str(), "public" | "default" | "all users" | "administrator") {
+                continue;
+            }
+            if seen_users.contains(&user_lower) { continue; }
+            seen_users.insert(user_lower);
+
+            // Extract a sample path (up to 200 chars of printable ASCII)
+            let path_start = abs_pos - marker.len();
+            let mut path_end = path_start;
+            while path_end < scan_data.len() && path_end - path_start < 200 {
+                let b = scan_data[path_end];
+                if b < 0x20 || b > 0x7e { break; }
+                path_end += 1;
+            }
+            let sample_path = String::from_utf8_lossy(&scan_data[path_start..path_end]).to_string();
+
+            let os_hint = if marker.starts_with(b"/") { "posix" } else { "windows" };
+            let mut evidence = BTreeMap::new();
+            evidence.insert("username".into(), user.clone());
+            evidence.insert("os_hint".into(), os_hint.into());
+            evidence.insert("sample_path".into(), sample_path);
+            evidence.insert("offset".into(), format!("{:#x}", path_start));
+
+            findings.push(OpsecFinding {
+                id: "OPSEC-009".into(),
+                finding_type: "source_path_leak".into(),
+                severity: "warning".into(),
+                source: "raw_bytes".into(),
+                description: format!(
+                    "Source/build path leaks username '{}' ({})",
+                    user, os_hint
+                ),
+                evidence,
+                confidence: 0.85,
+            });
         }
     }
 }
