@@ -28,11 +28,11 @@ impl EditorState {
         self.save_message = None;
     }
 
-    fn find_edit(&self, offset: usize) -> Option<usize> {
+    pub fn find_edit(&self, offset: usize) -> Option<usize> {
         self.edits.iter().position(|e| e.offset == offset)
     }
 
-    fn get_current_u16(&self, data: &[u8], offset: usize) -> u16 {
+    pub fn get_current_u16(&self, data: &[u8], offset: usize) -> u16 {
         if let Some(idx) = self.find_edit(offset) {
             self.edits[idx].new_value as u16
         } else {
@@ -40,7 +40,7 @@ impl EditorState {
         }
     }
 
-    fn get_current_u32(&self, data: &[u8], offset: usize) -> u32 {
+    pub fn get_current_u32(&self, data: &[u8], offset: usize) -> u32 {
         if let Some(idx) = self.find_edit(offset) {
             self.edits[idx].new_value as u32
         } else {
@@ -48,7 +48,7 @@ impl EditorState {
         }
     }
 
-    fn get_current_u64(&self, data: &[u8], offset: usize) -> u64 {
+    pub fn get_current_u64(&self, data: &[u8], offset: usize) -> u64 {
         if let Some(idx) = self.find_edit(offset) {
             self.edits[idx].new_value
         } else {
@@ -56,7 +56,7 @@ impl EditorState {
         }
     }
 
-    fn set_value(&mut self, offset: usize, size: usize, old_value: u64, new_value: u64, label: &str) {
+    pub fn set_value(&mut self, offset: usize, size: usize, old_value: u64, new_value: u64, label: &str) {
         if old_value == new_value {
             // Remove edit if reverted to original
             if let Some(idx) = self.find_edit(offset)

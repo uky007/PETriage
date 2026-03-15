@@ -460,37 +460,33 @@ impl eframe::App for ReadpeApp {
                             }
                         }
 
-                        // Tab bar (horizontally scrollable)
+                        // Tab bar (wrapping to multiple rows if needed)
                         egui::Frame::new()
                             .fill(BG_HEADER)
-                            .inner_margin(Margin::symmetric(8, 0))
+                            .inner_margin(Margin::symmetric(8, 2))
                             .stroke(Stroke::new(1.0, BORDER))
                             .show(ui, |ui| {
-                                egui::ScrollArea::horizontal()
-                                    .auto_shrink([false, true])
-                                    .show(ui, |ui| {
-                                        ui.horizontal(|ui| {
-                                            ui.add_space(4.0);
-                                            for tab in Tab::ALL {
-                                                let selected = self.current_tab == *tab;
-                                                let text = egui::RichText::new(tab.label())
-                                                    .color(if selected { ACCENT } else { TEXT_DIM });
-                                                let btn = egui::Button::new(text)
-                                                    .fill(if selected { BG_DARK } else { Color32::TRANSPARENT })
-                                                    .stroke(if selected {
-                                                        Stroke::new(1.0, ACCENT_DIM)
-                                                    } else {
-                                                        Stroke::NONE
-                                                    })
-                                                    .corner_radius(CornerRadius {
-                                                        nw: 4, ne: 4, sw: 0, se: 0,
-                                                    });
-                                                if ui.add(btn).clicked() {
-                                                    self.current_tab = *tab;
-                                                }
-                                            }
-                                        });
-                                    });
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.spacing_mut().item_spacing.x = 2.0;
+                                    for tab in Tab::ALL {
+                                        let selected = self.current_tab == *tab;
+                                        let text = egui::RichText::new(tab.label())
+                                            .color(if selected { ACCENT } else { TEXT_DIM });
+                                        let btn = egui::Button::new(text)
+                                            .fill(if selected { BG_DARK } else { Color32::TRANSPARENT })
+                                            .stroke(if selected {
+                                                Stroke::new(1.0, ACCENT_DIM)
+                                            } else {
+                                                Stroke::NONE
+                                            })
+                                            .corner_radius(CornerRadius {
+                                                nw: 4, ne: 4, sw: 0, se: 0,
+                                            });
+                                        if ui.add(btn).clicked() {
+                                            self.current_tab = *tab;
+                                        }
+                                    }
+                                });
                             });
 
                         // Clone result for panels that need mutable self
@@ -505,7 +501,7 @@ impl eframe::App for ReadpeApp {
                                     .show(ui, |ui| {
                                         match self.current_tab {
                                             Tab::FileInfo => panels::file_info::show(ui, &result, self.icon_cache.primary_icon.as_ref()),
-                                            Tab::Headers => panels::headers::show(ui, &result),
+                                            Tab::Headers => panels::headers::show(ui, &result, &data, &mut self.editor_state),
                                             Tab::Sections => panels::sections::show(ui, &result),
                                             Tab::Imports => panels::imports::show(ui, &result, &mut self.imports_state),
                                             Tab::Exports => panels::exports::show(ui, &result),
@@ -518,7 +514,7 @@ impl eframe::App for ReadpeApp {
                                             Tab::Authenticode => panels::authenticode::show(ui, &result),
                                             Tab::Opsec => panels::opsec::show(ui, &result),
                                             Tab::BuildInfo => panels::build_info::show(ui, &result),
-                                            Tab::Editor => panels::editor::show(ui, &data, &mut self.editor_state),
+                                            Tab::Editor => panels::headers::show(ui, &result, &data, &mut self.editor_state),
                                         }
                                     });
                             });
