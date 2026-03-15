@@ -401,6 +401,15 @@ pub struct BuildFingerprint {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub compiler_version: Option<String>,
     pub is_managed: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub packer: Option<PackerInfo>,
+    pub confidence: f32,
+    pub evidence: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct PackerInfo {
+    pub name: String,
     pub confidence: f32,
     pub evidence: Vec<String>,
 }
@@ -544,8 +553,10 @@ pub fn analyze(data: &[u8], pe: &PE, opts: &AnalysisOptions) -> AnalysisResult {
     );
     anomalies_vec.extend(opsec_anomalies);
 
-    // Build fingerprint (uses dotnet/go/debug/rich_header/optional_header/imports)
-    let fp = build_fingerprint(&dotnet, &go, &debug, &rich_header_parsed, &optional_header, &imports);
+    // Packer detection + Build fingerprint
+    let overlay_off = overlay_for_anomalies.as_ref().and_then(|o| if o.present { Some(o.offset) } else { None });
+    let packer = detect_packer(pe, data, overlay_off);
+    let fp = build_fingerprint(&dotnet, &go, &debug, &rich_header_parsed, &optional_header, &imports, packer);
 
     let rich_header = if opts.show_all { rich_header_parsed } else { None };
     let debug_output = if opts.show_all { debug } else { None };
@@ -2318,6 +2329,105 @@ fn classify_overlay(data: &[u8], overlay_offset: usize, overlay_size: usize) -> 
 
 // --- Build fingerprint ---
 
+fn detect_packer(pe: &PE, data: &[u8], overlay_offset: Option<usize>) -> Option<PackerInfo> {
+    let section_names: Vec<String> = pe.sections.iter()
+        .map(|s| String::from_utf8_lossy(&s.name).trim_end_matches('\0').to_string())
+        .collect();
+
+    struct PackerSig {
+        name: &'static str,
+        section_patterns: &'static [&'static str],
+        confidence: f32,
+    }
+
+    let sigs: &[PackerSig] = &[
+        PackerSig {
+            name: "UPX",
+            section_patterns: &["UPX0", "UPX1", "UPX2", ".UPX0", ".UPX1"],
+            confidence: 0.95,
+        },
+        PackerSig {
+            name: "ASPack",
+            section_patterns: &[".aspack", ".adata"],
+            confidence: 0.90,
+        },
+        PackerSig {
+            name: "Themida/WinLicense",
+            section_patterns: &[".themida", ".winlice"],
+            confidence: 0.90,
+        },
+        PackerSig {
+            name: "VMProtect",
+            section_patterns: &[".vmp0", ".vmp1", ".vmp2"],
+            confidence: 0.90,
+        },
+        PackerSig {
+            name: "Enigma Protector",
+            section_patterns: &[".enigma1", ".enigma2"],
+            confidence: 0.85,
+        },
+        PackerSig {
+            name: "PECompact",
+            section_patterns: &["PEC2", "PECompact2"],
+            confidence: 0.85,
+        },
+        PackerSig {
+            name: "MPRESS",
+            section_patterns: &[".MPRESS1", ".MPRESS2"],
+            confidence: 0.90,
+        },
+        PackerSig {
+            name: "Petite",
+            section_patterns: &[".petite"],
+            confidence: 0.85,
+        },
+        PackerSig {
+            name: "NSPack",
+            section_patterns: &[".nsp0", ".nsp1", ".nsp2", "nsp0", "nsp1"],
+            confidence: 0.85,
+        },
+    ];
+
+    // Check NSIS installer via overlay magic
+    if let Some(ov_off) = overlay_offset {
+        if ov_off + 16 <= data.len() {
+            let ov = &data[ov_off..];
+            // NSIS: starts with 0xEFBEADDE or contains "NullsoftInst" nearby
+            if ov.len() >= 4 && &ov[..4] == b"\xef\xbe\xad\xde" {
+                return Some(PackerInfo {
+                    name: "NSIS Installer".into(),
+                    confidence: 0.85,
+                    evidence: vec!["NSIS magic in overlay".into()],
+                });
+            }
+            // Inno Setup: "Inno Setup" string near overlay start
+            if ov.len() >= 64 && find_bytes(&ov[..64.min(ov.len())], b"Inno Setup").is_some() {
+                return Some(PackerInfo {
+                    name: "Inno Setup".into(),
+                    confidence: 0.85,
+                    evidence: vec!["Inno Setup signature in overlay".into()],
+                });
+            }
+        }
+    }
+
+    for sig in sigs {
+        let matched: Vec<&str> = sig.section_patterns.iter()
+            .filter(|pat| section_names.iter().any(|s| s.eq_ignore_ascii_case(pat)))
+            .copied()
+            .collect();
+        if !matched.is_empty() {
+            return Some(PackerInfo {
+                name: sig.name.into(),
+                confidence: sig.confidence,
+                evidence: matched.iter().map(|s| format!("section: {}", s)).collect(),
+            });
+        }
+    }
+
+    None
+}
+
 fn build_fingerprint(
     dotnet: &Option<DotNetInfo>,
     go: &Option<GoInfo>,
@@ -2325,99 +2435,111 @@ fn build_fingerprint(
     rich_header: &Option<RichHeaderInfo>,
     optional_header: &Option<OptionalHeader>,
     imports: &Option<Vec<ImportEntry>>,
+    packer: Option<PackerInfo>,
 ) -> Option<BuildFingerprint> {
-    // .NET takes priority
-    if let Some(dn) = dotnet {
-        return Some(BuildFingerprint {
+    // Determine compiler
+    let mut fp = if let Some(dn) = dotnet {
+        BuildFingerprint {
             compiler: ".NET".into(),
             compiler_version: Some(dn.runtime_version.clone()),
             is_managed: true,
+            packer: None,
             confidence: 0.99,
             evidence: vec!["CLR header present".into()],
-        });
-    }
-
-    // Go
-    if let Some(go) = go {
-        return Some(BuildFingerprint {
+        }
+    } else if let Some(go) = go {
+        BuildFingerprint {
             compiler: "Go".into(),
             compiler_version: None,
             is_managed: false,
+            packer: None,
             confidence: go.confidence,
             evidence: go.markers.clone(),
-        });
-    }
-
-    // Rust detection from PDB path
-    if let Some(dbg) = debug {
-        for entry in &dbg.entries {
-            if let Some(pdb) = &entry.pdb_path {
-                let p = pdb.to_ascii_lowercase();
-                if p.contains("\\target\\debug\\") || p.contains("\\target\\release\\")
-                    || p.contains("/target/debug/") || p.contains("/target/release/") {
-                    return Some(BuildFingerprint {
-                        compiler: "Rust".into(),
-                        compiler_version: None,
-                        is_managed: false,
-                        confidence: 0.75,
-                        evidence: vec![format!("Cargo build path in PDB: {}", pdb)],
-                    });
-                }
-            }
         }
-    }
-
-    // MSVC from Rich Header
-    if let Some(rich) = rich_header {
+    } else if let Some(pdb) = debug.as_ref().and_then(|dbg| {
+        dbg.entries.iter().find_map(|e| {
+            let p = e.pdb_path.as_ref()?;
+            let lower = p.to_ascii_lowercase();
+            if lower.contains("\\target\\debug\\") || lower.contains("\\target\\release\\")
+                || lower.contains("/target/debug/") || lower.contains("/target/release/") {
+                Some(p.clone())
+            } else {
+                None
+            }
+        })
+    }) {
+        BuildFingerprint {
+            compiler: "Rust".into(),
+            compiler_version: None,
+            is_managed: false,
+            packer: None,
+            confidence: 0.75,
+            evidence: vec![format!("Cargo build path in PDB: {}", pdb)],
+        }
+    } else if let Some(rich) = rich_header {
         if !rich.entries.is_empty() {
             let detail = rich.entries.iter()
                 .filter(|e| e.count > 0)
                 .filter_map(|e| e.description.as_deref())
                 .find(|d| d.contains("[LNK]"))
                 .map(|d| d.to_string());
-            return Some(BuildFingerprint {
+            BuildFingerprint {
                 compiler: "MSVC".into(),
                 compiler_version: detail,
                 is_managed: false,
+                packer: None,
                 confidence: 0.85,
                 evidence: vec!["Rich Header present".into()],
-            });
-        }
-    }
-
-    // MinGW heuristic: no Rich Header but imports msvcrt.dll/libgcc
-    if rich_header.is_none() {
-        if let Some(imps) = imports {
-            let has_mingw = imps.iter().any(|i| {
-                let dll = i.dll.to_ascii_lowercase();
-                dll.contains("libgcc") || dll.contains("libstdc++") || dll == "msvcrt.dll"
-            });
-            if has_mingw {
-                return Some(BuildFingerprint {
-                    compiler: "MinGW".into(),
-                    compiler_version: None,
-                    is_managed: false,
-                    confidence: 0.6,
-                    evidence: vec!["No Rich Header + MinGW-style imports".into()],
-                });
             }
+        } else {
+            return packer.map(|pk| BuildFingerprint {
+                compiler: "Unknown".into(), compiler_version: None,
+                is_managed: false, packer: Some(pk), confidence: 0.3,
+                evidence: vec!["Packer detected".into()],
+            });
         }
-    }
-
-    // Fallback: linker version from optional header
-    if let Some(opt) = optional_header {
+    } else if rich_header.is_none() && imports.as_ref().is_some_and(|imps| {
+        imps.iter().any(|i| {
+            let dll = i.dll.to_ascii_lowercase();
+            dll.contains("libgcc") || dll.contains("libstdc++") || dll == "msvcrt.dll"
+        })
+    }) {
+        BuildFingerprint {
+            compiler: "MinGW".into(),
+            compiler_version: None,
+            is_managed: false,
+            packer: None,
+            confidence: 0.6,
+            evidence: vec!["No Rich Header + MinGW-style imports".into()],
+        }
+    } else if let Some(opt) = optional_header {
         if opt.major_linker_version > 0 {
-            return Some(BuildFingerprint {
+            BuildFingerprint {
                 compiler: "Unknown".into(),
                 compiler_version: Some(format!("Linker {}.{}", opt.major_linker_version, opt.minor_linker_version)),
                 is_managed: false,
+                packer: None,
                 confidence: 0.3,
                 evidence: vec![format!("Linker version {}.{}", opt.major_linker_version, opt.minor_linker_version)],
+            }
+        } else {
+            return packer.map(|pk| BuildFingerprint {
+                compiler: "Unknown".into(), compiler_version: None,
+                is_managed: false, packer: Some(pk), confidence: 0.3,
+                evidence: vec!["Packer detected".into()],
             });
         }
-    }
+    } else {
+        return packer.map(|pk| BuildFingerprint {
+            compiler: "Unknown".into(), compiler_version: None,
+            is_managed: false, packer: Some(pk), confidence: 0.3,
+            evidence: vec!["Packer detected".into()],
+        });
+    };
 
-    None
+    // Attach packer info to whatever compiler was detected
+    fp.packer = packer;
+    Some(fp)
 }
 
 fn parse_dos_header(data: &[u8]) -> DosHeader {

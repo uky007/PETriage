@@ -50,6 +50,12 @@ pub fn format_text(result: &AnalysisResult) -> String {
         if fp.is_managed {
             out.push_str("  Managed:     Yes\n");
         }
+        if let Some(ref pk) = fp.packer {
+            out.push_str(&format!("  Packer:      {} (confidence: {:.0}%)\n", pk.name, pk.confidence * 100.0));
+            for ev in &pk.evidence {
+                out.push_str(&format!("               {}\n", ev));
+            }
+        }
         for ev in &fp.evidence {
             out.push_str(&format!("  Evidence:    {}\n", ev));
         }
