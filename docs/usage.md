@@ -142,3 +142,17 @@ Go-compiled DLL where PETriage's **OPSEC-009** warning rule detects the develope
 **GUI:**
 
 ![Sample 5 GUI](../images/demo_sample_5_gui_v0.4.1.png)
+
+---
+
+### Packer Detection: UPX-Packed PE
+
+PETriage detects known packers via multi-signal scoring: section name constellation (UPX0 + UPX1), near-start marker scan ("UPX!"), and corroboration from packing anomalies (high entropy, W^X, raw_size=0). Supported packers include UPX, MPRESS, ASPack, VMProtect, Themida/WinLicense, PECompact, NSPack, Petite, RLPack, Upack, NSIS, and Inno Setup.
+
+**CLI:**
+
+![Packer Detection CLI](../images/petriage_cui_packer_detect_v0.4.1.png)
+
+**GUI:**
+
+![Packer Detection GUI](../images/petriage_gui_packer_detect_v0.4.1.png)
