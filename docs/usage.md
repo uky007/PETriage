@@ -19,22 +19,23 @@ petriage <file.exe> --ndjson     # Compact one-line JSON output
 petriage --batch <dir> --ndjson  # Batch-analyze all PEs in a directory (NDJSON output)
 petriage --batch <dir> --json    # Batch-analyze all PEs (JSON array output)
 petriage <file.exe> --fail-on warning  # Exit code 3 if any warning+ anomaly found
+petriage <file.exe> --opsec-strict     # Enable credential/endpoint scanning via strings
 petriage <file.exe> -o report.txt      # Write to file
 ```
 
 ### jq recipes
 
 ```
+petriage <file.exe> --json | jq '.build_fingerprint'
 petriage <file.exe> --json | jq '.suspicious_summary'
 petriage <file.exe> --json | jq '.imports[].functions[] | select(.risk != null)'
 petriage <file.exe> --json | jq '.anomalies'
 petriage <file.exe> --json | jq '.anomalies[] | select(.severity == "critical")'
-petriage <file.exe> --json | jq '.resources'
+petriage <file.exe> --json | jq '.opsec'
+petriage <file.exe> --json | jq '.dotnet'
+petriage <file.exe> --json | jq '.go'
 petriage <file.exe> --json | jq '.resources.version_info'
-petriage <file.exe> --json | jq '.resources.manifest'
-petriage <file.exe> --json | jq '.authenticode'
 petriage <file.exe> --json | jq '.authenticode.signer'
-petriage <file.exe> --json | jq '.rich_header'
 petriage <file.exe> --json | jq '.rich_header.rich_hash'
 ```
 
@@ -66,157 +67,78 @@ petriage-gui <file.exe>          # Open file directly in GUI
 
 The GUI provides:
 
-- **Tabbed interface** -- File Info, Headers, Sections, Imports, Exports, Strings, Overlay, Resources, Rich, TLS, Debug, Signing, Editor
+- **Tabbed interface** -- File Info, Headers, Sections, Imports, Exports, Strings, Overlay, Resources, Rich, TLS, Debug, Signing, OPSEC, Build, Editor
 - **Drag & drop** -- Drop PE files onto the window to analyze
 - **Left sidebar** -- Toggle analysis options and re-analyze without restarting
 - **Import filter** -- Search API names across DLLs, "Suspicious only" toggle to surface risky APIs
 - **String filter** -- Filter by text and encoding (ASCII / UTF-16)
 - **Entropy color-coding** -- Section entropy highlighted green (<6) / yellow (6--7) / red (7--8)
 - **Suspicious API indicators** -- Color-coded severity badges (red/yellow/cyan) on File Info and Imports tabs
-- **Embedded icon display** -- Extracts and renders PE embedded icons (RT_GROUP_ICON / RT_ICON); primary icon shown on File Info tab, all icon groups on Resources tab. Useful for identifying malware impersonating legitimate software
-- **OPSEC indicators** -- PDB path highlighted in orange on Debug tab and File Info tab with dedicated badge, surfacing developer environment leaks
-- **PE Header Editor** -- Edit COFF header (TimeDateStamp, Characteristics), Optional header (AddressOfEntryPoint, ImageBase, DllCharacteristics flags, CheckSum, Subsystem, etc.), and Section headers (Name, VirtualSize, RawSize, Characteristics flags) with hex DragValue inputs and flag checkboxes. Modified fields highlighted. Save As writes patched PE to disk.
+- **Embedded icon display** -- Extracts and renders PE embedded icons (RT_GROUP_ICON / RT_ICON); primary icon shown on File Info tab, all icon groups on Resources tab
+- **OPSEC panel** -- Grouped findings by type (PDB path, version mismatch, credentials, endpoints, source path leaks, CI/CD traces, Rich Header integrity) with severity badges and evidence drill-down
+- **Build panel** -- Compiler fingerprint (.NET / Go / Rust / MSVC / MinGW), .NET metadata, Go build ID
+- **PE Header Editor** -- Edit COFF/Optional/Section headers with hex DragValue inputs and flag checkboxes. Save As writes patched PE to disk
 - **Hash copy buttons** -- One-click copy of MD5/SHA1/SHA256
 - **Virtual scroll** -- Handles tens of thousands of strings without lag
 
-## Example Output
+## Demo: Real-World Triage Examples
 
-```
-=== File Info ===
-  File:    sample.exe
-  Size:    72704 bytes (71.00 KB)
-  Type:    PE32 (32-bit)
+### Sample 1: Signed Benign PE (OneDrive.exe)
 
-=== OPSEC: PDB Path ===
-  C:\Users\dev\source\repos\malware\x64\Release\payload.pdb
+Demonstrates PETriage's handling of a legitimate signed binary: MSVC build fingerprint, Rich Header analysis, vendor metadata, icon and Authenticode certificate chain parsing.
 
-=== Hashes ===
-  MD5:     a1b2c3d4e5f6...
-  SHA1:    1234567890ab...
-  SHA256:  abcdef012345...
-  Imphash: 5a8e4dc5b6f7...
+**CLI:**
 
-=== COFF Header ===
-  Machine:              IMAGE_FILE_MACHINE_I386 (x86) (0x014c)
-  NumberOfSections:     5
-  TimeDateStamp:        0x65a1b2c3 (2024-01-12 15:30:27 UTC)
-  Characteristics:      0x0102
-                        - EXECUTABLE_IMAGE
-                        - 32BIT_MACHINE
+![Sample 1 CLI](../images/demo_sample_1_cui_v0.4.1.png)
 
-=== Sections (5) ===
-  Name         VirtSize     VirtAddr    RawSize      RawAddr  Entropy Characteristics
-  .text      0x00008a00 0x0000001000 0x00008c00 0x0000000400  6.4521 CODE | EXECUTE | READ
-  .rdata     0x00002600 0x000000a000 0x00002800 0x0000009000  5.1032 INITIALIZED_DATA | READ
-  ...
+**GUI:**
 
-=== Imports (4 DLLs, 32 functions) ===
-  KERNEL32.dll (18 functions)
-    - CreateProcessW [HIGH] Code Execution
-    - VirtualAllocEx [HIGH] Process Injection
-    - WriteProcessMemory [HIGH] Process Injection
-    - VirtualProtect [HIGH] Evasion
-    - GetComputerNameA [MED] Info Gathering
-    - CreateFileA [LOW] File / Registry
-    - ReadFile
-    - CloseHandle [LOW] Anti-Debug
-    ...
+![Sample 1 GUI](../images/demo_sample_1_gui_v0.4.1.png)
 
-=== Suspicious API Summary ===
-  Total suspicious APIs: 14
-  HIGH: 6 MEDIUM: 5 LOW: 3
+---
 
-  Category                 Count
-  ------------------------ -----
-  Process Injection            3
-  Code Execution               2
-  Network                      2
-  ...
+### Sample 2: OPSEC Leak with C2 URLs (Uphero.exe)
 
-=== Anomaly Detection ===
-  CRITICAL: 2 WARNING: 5 INFO: 4
+Malware sample with a developer OPSEC mistake: the PDB path leaks the build environment (`D:\youqu_job\SuperBrowser\wirevpnLauncher\...`).
 
-  [CRITICAL] Code Integrity: Section '.xpack' is both writable and executable (W^X violation)
-  [CRITICAL] Suspicious Combo: Process Injection + Evasion APIs both present -- possible code injection technique
-  [WARNING] Packing: Executable section '.text' has high entropy (6.8921)
-  [WARNING] Security: ASLR (DYNAMIC_BASE) is disabled
-  [WARNING] Security: DEP (NX_COMPAT) is disabled
-  [WARNING] Timestamp: Timestamp (1998-03-15 00:00:00 UTC) is before year 2000 -- possible forgery
-  [WARNING] Structure: Overlay data detected (4096 bytes at offset 0x12000)
-  [INFO] [OPSEC-001] OPSEC: PDB debug path found: C:\Users\dev\source\repos\malware\x64\Release\payload.pdb
-  [INFO] Security: Control Flow Guard (GUARD_CF) is not enabled
-  [INFO] Structure: Non-standard section name '.xpack'
-  [INFO] [RICH-002] Rich Header: No Rich Header found -- PE may not have been built with MSVC toolchain
-  ...
+**CLI:**
 
-=== Rich Header ===
-  XOR Key:    0xaabbccdd
-  Rich Hash:  a1b2c3d4e5f67890abcdef1234567890
-  Checksum:   Valid
+![Sample 2 CLI](../images/demo_sample_2_cui_v0.4.1.png)
 
-  CompID         ProdID  BuildID    Count  Description
-  ------------ ------  -------  -------  ------------------------------
-  0x01070042      263       66        7  [C++] VS 2005 (build 66)
-  0x010a71b3      266    29107        1  [LNK] VS 2019 16.7 (build 29110)
-  ...
+**GUI:**
 
-=== Resources (12 entries) ===
-  Version Info:
-    FileVersion:    10.0.19041.1
-    ProductVersion: 10.0.19041.1
-    FileType:       Application (1)
-    FileOS:         0x40004
-    FileFlags:      0x0
-    String Info:
-      CompanyName:             Microsoft Corporation
-      FileDescription:         Windows Notepad
-      OriginalFilename:        NOTEPAD.EXE
+![Sample 2 GUI](../images/demo_sample_2_gui_v0.4.1.png)
 
-  Manifest:
-    <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-    <assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
-      <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
-        <security>
-          <requestedPrivileges>
-            <requestedExecutionLevel level="asInvoker" uiAccess="false"/>
-          </requestedPrivileges>
-        </security>
-      </trustInfo>
-    </assembly>
+---
 
-  Type                 Name             Language       Size          RVA
-  -------------------- ---------------- ---------- -------- ------------
-  RT_ICON              #1               en-US          1128 0x00003a000
-  RT_VERSION           #1               en-US           836 0x00003c000
-  RT_MANIFEST          #1               en-US           522 0x00003d000
-  ...
+### Sample 3: Packed Backdoor with EP Spoofing (chrysalis_backdoor.exe)
 
-=== Authenticode / Code Signing ===
-  Signed:          Yes
-  Parse OK:        Yes
-  Trust Verified:  No (not implemented)
+A warning indicates that the entry point (0x2c5d0) exists in the `.rdata` section but not in the `.text` section (**CODE-002**). Based on this, it is expected that code execution will begin during CRT initialization or similar processes.
 
-  WIN_CERTIFICATE:
-    Length:   9640 bytes
-    Revision: WIN_CERT_REVISION_2_0 (0x0200)
-    Type:     WIN_CERT_TYPE_PKCS_SIGNED_DATA (0x0002)
+**CLI:**
 
-  Signer:
-    Subject:    Microsoft Corporation
-    Issuer:     Microsoft Code Signing PCA 2011
-    Serial:     33:00:00:01:c4:22:b2:f7:9b:18:54:...
-    Not Before: 2023-05-18 18:09:06 UTC
-    Not After:  2024-05-16 18:09:06 UTC
-    Thumbprint: a1:b2:c3:d4:e5:f6:...
+![Sample 3 CLI](../images/demo_sample_3_cui_v0.4.1.png)
 
-  Certificate Chain (3 certificates):
-    [0] (signer)
-      Subject:    Microsoft Corporation
-      ...
-    [1]
-      Subject:    Microsoft Code Signing PCA 2011
-      ...
-    [2]
-      Subject:    Microsoft Root Certificate Authority 2011
-      ...
-```
+---
+
+### Sample 4: Go RunPE Loader
+
+Go-compiled PE automatically identified with 95% confidence via multi-marker detection. The Go build ID is extracted for campaign pivoting. Characteristic Go binary traits are visible: 8MB static binary, single DLL import (kernel32.dll), no Rich Header.
+
+**CLI:**
+
+![Sample 4 CLI](../images/demo_sample_4_cui_v0.4.1.png)
+
+---
+
+### Sample 5: Go DLL with Developer Username Leak (hero.dll)
+
+Go-compiled DLL where PETriage's **OPSEC-009** warning rule detects the developer username `srui` leaked through Go module cache paths (`C:/Users/srui/go/pkg/mod/...`) embedded in the binary.
+
+**CLI:**
+
+![Sample 5 CLI](../images/demo_sample_5_cui_v0.4.1.png)
+
+**GUI:**
+
+![Sample 5 GUI](../images/demo_sample_5_gui_v0.4.1.png)

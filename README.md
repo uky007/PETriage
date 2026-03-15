@@ -80,6 +80,14 @@ See [docs/usage.md](docs/usage.md) for full CLI options, `jq` recipes, TUI/GUI d
 
 ![PETriage GUI](images/petriage_gui_v0.1.0.png)
 
+### Headers (Structure View + Editor)
+
+![PETriage Headers](images/petriage_gui_headers_v0.4.1.png)
+
+### Header Editor (Inline Editing)
+
+![PETriage Editor](images/petriage_gui_editor_v0.4.1.png)
+
 ## Exit Codes
 
 | Code | Meaning |
