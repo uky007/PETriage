@@ -67,7 +67,7 @@ petriage-gui <file.exe>          # Open file directly in GUI
 
 The GUI provides:
 
-- **Tabbed interface** -- File Info, Headers, Sections, Imports, Exports, Strings, Overlay, Resources, Rich, TLS, Debug, Signing, OPSEC, Build, Editor
+- **Tabbed interface** -- File Info, Headers, Sections, Imports, Exports, Strings, Overlay, Resources, Rich, TLS, Debug, Signing, OPSEC, Build
 - **Drag & drop** -- Drop PE files onto the window to analyze
 - **Left sidebar** -- Toggle analysis options and re-analyze without restarting
 - **Import filter** -- Search API names across DLLs, "Suspicious only" toggle to surface risky APIs

@@ -1796,12 +1796,23 @@ fn detect_source_path_leaks_raw(
             let abs_pos = match_start + marker.len();
             pos = abs_pos;
 
-            // Skip if this /home/ is part of a URL (preceded by :// or .com/ etc.)
-            // Look back for "://" within 16 bytes before the match
+            // Skip if this /home/ is part of a URL or domain path.
+            // Look back for URL indicators: "://", "www.", or ".com", ".net" etc.
             if match_start >= 3 {
-                let lookback_start = match_start.saturating_sub(16);
+                let lookback_start = match_start.saturating_sub(32);
                 let lookback = &scan_data[lookback_start..match_start];
-                if lookback.windows(3).any(|w| w == b"://") {
+                let is_url = lookback.windows(3).any(|w| w == b"://")
+                    || lookback.windows(4).any(|w| w == b"www.")
+                    || lookback.windows(4).any(|w| w == b".com" || w == b".net" || w == b".org" || w == b".io/");
+                if is_url { continue; }
+                // Also skip if preceded by a dot (domain component like api.example.local/home/)
+                if match_start > 0 && scan_data[match_start - 1] != b'\0'
+                    && scan_data[match_start - 1] != b'\n'
+                    && scan_data[match_start - 1] != b'\r'
+                    && scan_data[match_start - 1] > 0x20
+                    && scan_data[match_start - 1] != b'"'
+                    && *marker == b"/home/" as &[u8] {
+                    // /home/ mid-string (not at string boundary) — likely a URL path
                     continue;
                 }
             }
