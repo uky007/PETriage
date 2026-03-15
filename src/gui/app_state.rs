@@ -16,7 +16,6 @@ pub enum Tab {
     Authenticode,
     Opsec,
     BuildInfo,
-    Editor,
 }
 
 impl Tab {
@@ -35,7 +34,6 @@ impl Tab {
         Tab::Authenticode,
         Tab::Opsec,
         Tab::BuildInfo,
-        Tab::Editor,
     ];
 
     pub fn label(&self) -> &'static str {
@@ -54,7 +52,6 @@ impl Tab {
             Tab::Authenticode => "Signing",
             Tab::Opsec => "OPSEC",
             Tab::BuildInfo => "Build",
-            Tab::Editor => "Editor",
         }
     }
 }

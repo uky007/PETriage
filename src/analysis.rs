@@ -1792,8 +1792,19 @@ fn detect_source_path_leaks_raw(
                 Some(off) => off,
                 None => break,
             };
-            let abs_pos = pos + found + marker.len();
+            let match_start = pos + found;
+            let abs_pos = match_start + marker.len();
             pos = abs_pos;
+
+            // Skip if this /home/ is part of a URL (preceded by :// or .com/ etc.)
+            // Look back for "://" within 16 bytes before the match
+            if match_start >= 3 {
+                let lookback_start = match_start.saturating_sub(16);
+                let lookback = &scan_data[lookback_start..match_start];
+                if lookback.windows(3).any(|w| w == b"://") {
+                    continue;
+                }
+            }
 
             // Extract username: read printable ASCII until / or \ or non-printable
             let user_start = abs_pos;
@@ -3044,13 +3055,17 @@ fn detect_overlay(data: &[u8], pe: &PE) -> OverlayInfo {
     // Exclude known post-section data from overlay:
     // 1. Certificate table (Data Directory 4) sits after sections but is not overlay
     // 2. COFF symbol table (PointerToSymbolTable) is legitimate PE data
+    // Only trust these if they actually fall in the post-section region AND within file bounds.
     let mut known_tail_end = end_of_pe;
 
-    // Certificate table
+    // Certificate table (uses file offsets, not RVA)
     if let Some(opt) = pe.header.optional_header.as_ref() {
         if let Some(Some((_, dd))) = opt.data_directories.data_directories.get(4) {
-            if dd.virtual_address > 0 && dd.size > 0 {
-                let cert_end = (dd.virtual_address as usize).saturating_add(dd.size as usize);
+            let cert_start = dd.virtual_address as usize;
+            let cert_end = cert_start.saturating_add(dd.size as usize);
+            // Only trust if cert starts at or after end_of_pe and ends within file
+            if dd.virtual_address > 0 && dd.size > 0
+                && cert_start >= end_of_pe && cert_end <= data.len() {
                 if cert_end > known_tail_end {
                     known_tail_end = cert_end;
                 }
@@ -3062,17 +3077,18 @@ fn detect_overlay(data: &[u8], pe: &PE) -> OverlayInfo {
     let sym_ptr = pe.header.coff_header.pointer_to_symbol_table as usize;
     let sym_count = pe.header.coff_header.number_of_symbol_table as usize;
     if sym_ptr > 0 && sym_count > 0 {
-        // Each symbol entry is 18 bytes; string table follows immediately after
         let sym_end = sym_ptr.saturating_add(sym_count.saturating_mul(18));
-        // String table starts at sym_end; its first 4 bytes are the table size
-        let strtab_end = if sym_end + 4 <= data.len() {
-            let strtab_size = read_u32_le(data, sym_end) as usize;
-            sym_end.saturating_add(strtab_size)
-        } else {
-            sym_end
-        };
-        if strtab_end > known_tail_end {
-            known_tail_end = strtab_end;
+        // Only trust if symbol table starts at or after end_of_pe and within file
+        if sym_ptr >= end_of_pe && sym_end <= data.len() {
+            let strtab_end = if sym_end + 4 <= data.len() {
+                let strtab_size = read_u32_le(data, sym_end) as usize;
+                sym_end.saturating_add(strtab_size).min(data.len())
+            } else {
+                sym_end
+            };
+            if strtab_end > known_tail_end {
+                known_tail_end = strtab_end;
+            }
         }
     }
 

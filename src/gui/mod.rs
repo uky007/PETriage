@@ -514,7 +514,6 @@ impl eframe::App for ReadpeApp {
                                             Tab::Authenticode => panels::authenticode::show(ui, &result),
                                             Tab::Opsec => panels::opsec::show(ui, &result),
                                             Tab::BuildInfo => panels::build_info::show(ui, &result),
-                                            Tab::Editor => panels::headers::show(ui, &result, &data, &mut self.editor_state),
                                         }
                                     });
                             });

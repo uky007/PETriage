@@ -301,9 +301,16 @@ pub fn show(ui: &mut Ui, result: &AnalysisResult, data: &[u8], editor: &mut Edit
                 let sec_base = sections_offset + i * 40;
                 if sec_base + 40 > data.len() { break; }
 
-                let name_bytes = &data[sec_base..sec_base + 8];
-                let name_end = name_bytes.iter().position(|&b| b == 0).unwrap_or(8);
-                let sec_name = String::from_utf8_lossy(&name_bytes[..name_end]).to_string();
+                // Use pending edit value for section name if available
+                let sec_name = if let Some(idx) = editor.find_edit(sec_base) {
+                    let val_bytes = editor.edits[idx].new_value.to_le_bytes();
+                    let end = val_bytes.iter().position(|&b| b == 0).unwrap_or(8);
+                    String::from_utf8_lossy(&val_bytes[..end]).to_string()
+                } else {
+                    let name_bytes = &data[sec_base..sec_base + 8];
+                    let end = name_bytes.iter().position(|&b| b == 0).unwrap_or(8);
+                    String::from_utf8_lossy(&name_bytes[..end]).to_string()
+                };
 
                 egui::CollapsingHeader::new(
                     egui::RichText::new(format!("[{}] {}", i, sec_name)).color(Color32::from_rgb(200, 200, 220)).size(12.0),
@@ -315,7 +322,7 @@ pub fn show(ui: &mut Ui, result: &AnalysisResult, data: &[u8], editor: &mut Edit
                         .num_columns(3)
                         .spacing([12.0, 6.0])
                         .show(ui, |ui| {
-                            // Name (text edit)
+                            // Name (text edit) — uses pending value
                             ui.colored_label(LABEL, "Name:");
                             let mut name_str = sec_name.clone();
                             let resp = ui.add(egui::TextEdit::singleline(&mut name_str).desired_width(80.0).font(egui::FontId::monospace(13.0)));
