@@ -526,7 +526,7 @@ pub fn analyze(data: &[u8], pe: &PE, opts: &AnalysisOptions) -> AnalysisResult {
 
     let mut anomalies_vec = detect_anomalies(
         &sections, &coff_header, &optional_header, &overlay_for_anomalies, &suspicious_summary, &debug,
-        &rich_header_parsed,
+        &rich_header_parsed, &imports,
     );
 
     // OPSEC detection (OPSEC-002 through OPSEC-008)
@@ -599,13 +599,22 @@ fn detect_anomalies(
     suspicious_summary: &Option<SuspiciousSummary>,
     debug: &Option<DebugInfo>,
     rich_header: &Option<RichHeaderInfo>,
+    imports: &Option<Vec<ImportEntry>>,
 ) -> Vec<Anomaly> {
     let mut anomalies = Vec::new();
 
     let standard_names: &[&str] = &[
         ".text", ".data", ".rdata", ".rsrc", ".reloc",
         ".bss", ".idata", ".edata", ".tls", ".pdata",
+        // COFF long section names (numeric references to string table)
+        ".CRT", ".symtab",
+        // Go-specific sections
+        ".gopclntab", ".go.buildinfo",
     ];
+    // COFF string table references (/4, /19, etc.) are also standard
+    let is_coff_strtab_ref = |name: &str| -> bool {
+        name.starts_with('/') && name[1..].chars().all(|c| c.is_ascii_digit())
+    };
 
     // Section-based rules
     if let Some(sections) = sections {
@@ -686,7 +695,7 @@ fn detect_anomalies(
             }
 
             // Rule 15: Non-standard section name
-            if !standard_names.contains(&sec.name.as_str()) {
+            if !standard_names.contains(&sec.name.as_str()) && !is_coff_strtab_ref(&sec.name) {
                 anomalies.push(Anomaly {
                     rule_id: "STRUCT-003".into(),
                     category: "Structure".into(),
@@ -818,7 +827,12 @@ fn detect_anomalies(
                 .duration_since(SystemTime::UNIX_EPOCH)
                 .map(|d| d.as_secs() as u32)
                 .unwrap_or(0);
-            if now > 0 && ts > now {
+            // Suppress future-timestamp warning when REPRO debug type is present:
+            // reproducible builds use a content hash as the timestamp, not a real date.
+            let has_repro = debug.as_ref().is_some_and(|d| {
+                d.entries.iter().any(|e| e.debug_type_raw == 16) // 16 = IMAGE_DEBUG_TYPE_REPRO
+            });
+            if now > 0 && ts > now && !has_repro {
                 anomalies.push(Anomaly {
                     rule_id: "TIME-001".into(),
                     category: "Timestamp".into(),
@@ -897,7 +911,19 @@ fn detect_anomalies(
         };
 
         // Rule 17: Process Injection + Evasion
-        if has_category("Process Injection") && has_category("Evasion") {
+        // Require at least one strong injection API (CreateRemoteThread, WriteProcessMemory, etc.)
+        // to avoid false positives on benign software that imports OpenProcess + SetFileAttributes.
+        let has_strong_injection = imports.as_ref().is_some_and(|imps| {
+            let strong_apis = [
+                "CreateRemoteThread", "CreateRemoteThreadEx",
+                "WriteProcessMemory", "NtWriteVirtualMemory",
+                "VirtualAllocEx", "VirtualAllocExNuma",
+                "NtMapViewOfSection", "QueueUserAPC", "NtQueueApcThread",
+                "SetThreadContext", "NtSetContextThread", "RtlCreateUserThread",
+            ];
+            imps.iter().any(|dll| dll.functions.iter().any(|f| strong_apis.contains(&f.name.as_str())))
+        });
+        if has_strong_injection && has_category("Evasion") {
             anomalies.push(Anomaly {
                 rule_id: "COMBO-001".into(),
                 category: "Suspicious Combo".into(),
@@ -1305,7 +1331,11 @@ fn detect_version_mismatch(
         }
     }
 
-    // Check InternalName
+    // Check InternalName — but downgrade if OriginalFilename already matches on-disk name,
+    // since InternalName is often a product description (e.g., "Client Application") rather
+    // than a filename, and a mismatch alone is not suspicious in that case.
+    let orig_matches = original_filename.as_ref()
+        .is_some_and(|orig| mismatch_score(&on_disk_lower, &orig.to_ascii_lowercase()) == 0);
     let internal_name = ver.string_info.iter()
         .find(|kv| kv.key.eq_ignore_ascii_case("InternalName"))
         .map(|kv| kv.value.trim().to_string());
@@ -1314,34 +1344,39 @@ fn detect_version_mismatch(
         if !iname.is_empty() {
             let iname_lower = iname.to_ascii_lowercase();
             let score = mismatch_score(&on_disk_lower, &iname_lower);
+            // When OriginalFilename matches, InternalName mismatch is just info
+            let effective_severity = if orig_matches && score >= 2 { "info" } else if score >= 2 { "warning" } else { "info" };
             if score >= 2 {
                 let mut evidence = BTreeMap::new();
                 evidence.insert("on_disk_name".into(), on_disk.clone());
                 evidence.insert("internal_name".into(), iname.clone());
-                evidence.insert("mismatch_level".into(), "strong".into());
+                evidence.insert("mismatch_level".into(), if orig_matches { "weak_internal_only" } else { "strong" }.into());
                 findings.push(OpsecFinding {
                     id: "OPSEC-004".into(),
                     finding_type: "version_mismatch".into(),
-                    severity: "warning".into(),
+                    severity: effective_severity.into(),
                     source: "version_info".into(),
                     description: format!(
-                        "Filename mismatch: on-disk '{}' vs InternalName '{}' — possible masquerading",
-                        on_disk, iname
+                        "Filename mismatch: on-disk '{}' vs InternalName '{}'{}",
+                        on_disk, iname,
+                        if orig_matches { "" } else { " — possible masquerading" }
                     ),
                     evidence,
-                    confidence: 0.85,
+                    confidence: if orig_matches { 0.3 } else { 0.85 },
                 });
-                anomalies.push(Anomaly {
-                    rule_id: "OPSEC-004".into(),
-                    category: "OPSEC".into(),
-                    severity: "warning".into(),
-                    description: format!(
-                        "Filename mismatch: on-disk '{}' vs InternalName '{}' — possible masquerading",
-                        on_disk, iname
-                    ),
-                    evidence: Some(format!("on_disk={}, internal_name={}", on_disk, iname)),
-                    threshold: None,
-                });
+                if !orig_matches {
+                    anomalies.push(Anomaly {
+                        rule_id: "OPSEC-004".into(),
+                        category: "OPSEC".into(),
+                        severity: "warning".into(),
+                        description: format!(
+                            "Filename mismatch: on-disk '{}' vs InternalName '{}' — possible masquerading",
+                            on_disk, iname
+                        ),
+                        evidence: Some(format!("on_disk={}, internal_name={}", on_disk, iname)),
+                        threshold: None,
+                    });
+                }
             } else if score == 1 {
                 let mut evidence = BTreeMap::new();
                 evidence.insert("on_disk_name".into(), on_disk.clone());
@@ -2914,31 +2949,54 @@ fn detect_overlay(data: &[u8], pe: &PE) -> OverlayInfo {
         return no_overlay;
     }
 
-    // Exclude the certificate table (Data Directory 4) from the overlay region.
-    // The certificate table sits after sections but is not overlay data.
-    let cert_covers_tail = if let Some(opt) = pe.header.optional_header.as_ref() {
-        match opt.data_directories.data_directories.get(4) {
-            Some(Some((_, dd))) if dd.virtual_address > 0 && dd.size > 0 => {
-                let cert_start = dd.virtual_address as usize;
-                let cert_end = cert_start.saturating_add(dd.size as usize);
-                // Certificate table uses file offsets (not RVA), and typically
-                // starts at or after end_of_pe. If it covers the entire tail,
-                // there is no real overlay.
-                cert_start <= end_of_pe && cert_end >= data.len()
-            }
-            _ => false,
-        }
-    } else {
-        false
-    };
+    // Exclude known post-section data from overlay:
+    // 1. Certificate table (Data Directory 4) sits after sections but is not overlay
+    // 2. COFF symbol table (PointerToSymbolTable) is legitimate PE data
+    let mut known_tail_end = end_of_pe;
 
-    if cert_covers_tail {
+    // Certificate table
+    if let Some(opt) = pe.header.optional_header.as_ref() {
+        if let Some(Some((_, dd))) = opt.data_directories.data_directories.get(4) {
+            if dd.virtual_address > 0 && dd.size > 0 {
+                let cert_end = (dd.virtual_address as usize).saturating_add(dd.size as usize);
+                if cert_end > known_tail_end {
+                    known_tail_end = cert_end;
+                }
+            }
+        }
+    }
+
+    // COFF symbol table + string table
+    let sym_ptr = pe.header.coff_header.pointer_to_symbol_table as usize;
+    let sym_count = pe.header.coff_header.number_of_symbol_table as usize;
+    if sym_ptr > 0 && sym_count > 0 {
+        // Each symbol entry is 18 bytes; string table follows immediately after
+        let sym_end = sym_ptr.saturating_add(sym_count.saturating_mul(18));
+        // String table starts at sym_end; its first 4 bytes are the table size
+        let strtab_end = if sym_end + 4 <= data.len() {
+            let strtab_size = read_u32_le(data, sym_end) as usize;
+            sym_end.saturating_add(strtab_size)
+        } else {
+            sym_end
+        };
+        if strtab_end > known_tail_end {
+            known_tail_end = strtab_end;
+        }
+    }
+
+    if known_tail_end >= data.len() {
+        return no_overlay;
+    }
+
+    // Real overlay starts after all known PE structures
+    let overlay_start = known_tail_end.max(end_of_pe);
+    if overlay_start >= data.len() {
         return no_overlay;
     }
 
     OverlayInfo {
-        offset: end_of_pe,
-        size: data.len() - end_of_pe,
+        offset: overlay_start,
+        size: data.len() - overlay_start,
         present: true,
         classification: None,
     }
