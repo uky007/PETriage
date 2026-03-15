@@ -555,7 +555,7 @@ pub fn analyze(data: &[u8], pe: &PE, opts: &AnalysisOptions) -> AnalysisResult {
 
     // Packer detection + Build fingerprint
     let overlay_off = overlay_for_anomalies.as_ref().and_then(|o| if o.present { Some(o.offset) } else { None });
-    let packer = detect_packer(pe, data, overlay_off);
+    let packer = detect_packer(pe, data, overlay_off, &anomalies_vec);
     let fp = build_fingerprint(&dotnet, &go, &debug, &rich_header_parsed, &optional_header, &imports, packer);
 
     let rich_header = if opts.show_all { rich_header_parsed } else { None };
@@ -2329,98 +2329,206 @@ fn classify_overlay(data: &[u8], overlay_offset: usize, overlay_size: usize) -> 
 
 // --- Build fingerprint ---
 
-fn detect_packer(pe: &PE, data: &[u8], overlay_offset: Option<usize>) -> Option<PackerInfo> {
+fn detect_packer(pe: &PE, data: &[u8], overlay_offset: Option<usize>,
+                 anomalies: &[Anomaly]) -> Option<PackerInfo> {
     let section_names: Vec<String> = pe.sections.iter()
         .map(|s| String::from_utf8_lossy(&s.name).trim_end_matches('\0').to_string())
         .collect();
+    let has_section = |pat: &str| -> bool {
+        section_names.iter().any(|s| s.eq_ignore_ascii_case(pat))
+    };
 
-    struct PackerSig {
-        name: &'static str,
-        section_patterns: &'static [&'static str],
-        confidence: f32,
-    }
+    // Corroboration signals from existing anomalies
+    let has_anomaly = |rule: &str| anomalies.iter().any(|a| a.rule_id == rule);
+    let has_pack_001 = has_anomaly("PACK-001"); // entropy > 7.0
+    let has_pack_003 = has_anomaly("PACK-003"); // raw_size=0
+    let has_pack_004 = has_anomaly("PACK-004"); // expansion ratio > 10x
+    let has_code_002 = has_anomaly("CODE-002"); // EP not in .text
+    let corroboration_bonus = |score: &mut f32| {
+        if has_pack_001 { *score += 0.15; }
+        if has_pack_003 { *score += 0.15; }
+        if has_pack_004 { *score += 0.10; }
+        if has_code_002 { *score += 0.05; }
+    };
 
-    let sigs: &[PackerSig] = &[
-        PackerSig {
-            name: "UPX",
-            section_patterns: &["UPX0", "UPX1", "UPX2", ".UPX0", ".UPX1"],
-            confidence: 0.95,
-        },
-        PackerSig {
-            name: "ASPack",
-            section_patterns: &[".aspack", ".adata"],
-            confidence: 0.90,
-        },
-        PackerSig {
-            name: "Themida/WinLicense",
-            section_patterns: &[".themida", ".winlice"],
-            confidence: 0.90,
-        },
-        PackerSig {
-            name: "VMProtect",
-            section_patterns: &[".vmp0", ".vmp1", ".vmp2"],
-            confidence: 0.90,
-        },
-        PackerSig {
-            name: "Enigma Protector",
-            section_patterns: &[".enigma1", ".enigma2"],
-            confidence: 0.85,
-        },
-        PackerSig {
-            name: "PECompact",
-            section_patterns: &["PEC2", "PECompact2"],
-            confidence: 0.85,
-        },
-        PackerSig {
-            name: "MPRESS",
-            section_patterns: &[".MPRESS1", ".MPRESS2"],
-            confidence: 0.90,
-        },
-        PackerSig {
-            name: "Petite",
-            section_patterns: &[".petite"],
-            confidence: 0.85,
-        },
-        PackerSig {
-            name: "NSPack",
-            section_patterns: &[".nsp0", ".nsp1", ".nsp2", "nsp0", "nsp1"],
-            confidence: 0.85,
-        },
-    ];
-
-    // Check NSIS installer via overlay magic
+    // --- Overlay-based detections (Tier A: high precision) ---
     if let Some(ov_off) = overlay_offset {
-        if ov_off + 16 <= data.len() {
+        if ov_off < data.len() {
             let ov = &data[ov_off..];
-            // NSIS: starts with 0xEFBEADDE or contains "NullsoftInst" nearby
+            let scan_len = ov.len().min(256 * 1024); // scan up to 256KB of overlay
+
+            // NSIS: magic 0xEFBEADDE or "NullsoftInst" string
             if ov.len() >= 4 && &ov[..4] == b"\xef\xbe\xad\xde" {
                 return Some(PackerInfo {
                     name: "NSIS Installer".into(),
-                    confidence: 0.85,
-                    evidence: vec!["NSIS magic in overlay".into()],
+                    confidence: 0.90,
+                    evidence: vec!["NSIS magic (0xEFBEADDE) in overlay".into()],
                 });
             }
-            // Inno Setup: "Inno Setup" string near overlay start
-            if ov.len() >= 64 && find_bytes(&ov[..64.min(ov.len())], b"Inno Setup").is_some() {
+            if find_bytes(&ov[..scan_len], b"NullsoftInst").is_some() {
+                return Some(PackerInfo {
+                    name: "NSIS Installer".into(),
+                    confidence: 0.90,
+                    evidence: vec!["NullsoftInst string in overlay".into()],
+                });
+            }
+
+            // Inno Setup: "Inno Setup Setup Data" in overlay
+            if find_bytes(&ov[..scan_len], b"Inno Setup Setup Data").is_some() {
                 return Some(PackerInfo {
                     name: "Inno Setup".into(),
-                    confidence: 0.85,
+                    confidence: 0.90,
+                    evidence: vec!["Inno Setup Setup Data in overlay".into()],
+                });
+            }
+            // Inno Setup fallback: "Inno Setup" in first 1KB
+            if find_bytes(&ov[..ov.len().min(1024)], b"Inno Setup").is_some() {
+                return Some(PackerInfo {
+                    name: "Inno Setup".into(),
+                    confidence: 0.80,
                     evidence: vec!["Inno Setup signature in overlay".into()],
                 });
             }
         }
     }
 
-    for sig in sigs {
-        let matched: Vec<&str> = sig.section_patterns.iter()
-            .filter(|pat| section_names.iter().any(|s| s.eq_ignore_ascii_case(pat)))
-            .copied()
+    // --- UPX (Tier A: section constellation + near-start marker scan) ---
+    {
+        let mut score = 0.0f32;
+        let mut evidence = Vec::new();
+
+        let has_upx0 = has_section("UPX0") || has_section(".UPX0");
+        let has_upx1 = has_section("UPX1") || has_section(".UPX1");
+        let has_upx2 = has_section("UPX2") || has_section(".UPX2") || has_section("UPX!");
+
+        if has_upx0 && has_upx1 {
+            score += 0.60;
+            evidence.push("section constellation: UPX0 + UPX1".into());
+        } else if has_upx0 || has_upx1 || has_upx2 {
+            score += 0.35;
+            evidence.push("single UPX section name".into());
+        }
+
+        // Near-start marker scan (0..1024) — common UPX YARA approach
+        let window = &data[..data.len().min(1024)];
+        if find_bytes(window, b"UPX!").is_some() {
+            score += 0.30;
+            evidence.push("UPX! marker in header (0..1024)".into());
+        }
+
+        corroboration_bonus(&mut score);
+        if score >= 0.60 {
+            return Some(PackerInfo {
+                name: "UPX".into(),
+                confidence: score.min(1.0),
+                evidence,
+            });
+        }
+    }
+
+    // --- MPRESS (Tier A: 2-name constellation) ---
+    {
+        let has_m1 = has_section(".MPRESS1");
+        let has_m2 = has_section(".MPRESS2");
+        if has_m1 && has_m2 {
+            let mut score = 0.70f32;
+            corroboration_bonus(&mut score);
+            return Some(PackerInfo {
+                name: "MPRESS".into(),
+                confidence: score.min(1.0),
+                evidence: vec!["section constellation: .MPRESS1 + .MPRESS2".into()],
+            });
+        } else if has_m1 || has_m2 {
+            let mut score = 0.45f32;
+            corroboration_bonus(&mut score);
+            if score >= 0.60 {
+                return Some(PackerInfo {
+                    name: "MPRESS".into(),
+                    confidence: score.min(1.0),
+                    evidence: vec!["single MPRESS section name".into()],
+                });
+            }
+        }
+    }
+
+    // --- ASPack (needs .aspack; .adata alone is ambiguous) ---
+    {
+        let has_aspack = has_section(".aspack") || has_section("ASPack") || has_section(".ASPack");
+        let has_adata = has_section(".adata");
+        if has_aspack {
+            let mut score = if has_adata { 0.70f32 } else { 0.50 };
+            corroboration_bonus(&mut score);
+            if score >= 0.50 {
+                let mut ev = vec![];
+                if has_aspack { ev.push("section: .aspack".into()); }
+                if has_adata { ev.push("section: .adata (corroborating)".into()); }
+                return Some(PackerInfo {
+                    name: "ASPack".into(),
+                    confidence: score.min(1.0),
+                    evidence: ev,
+                });
+            }
+        }
+    }
+
+    // --- Spoofable protectors (Tier B: medium confidence, require corroboration for high) ---
+    struct ProtectorSig { name: &'static str, patterns: &'static [&'static str] }
+    let protectors = [
+        ProtectorSig { name: "Themida/WinLicense", patterns: &["Themida", ".Themida", ".themida", "WinLicen", ".winlice"] },
+        ProtectorSig { name: "VMProtect", patterns: &[".vmp0", ".vmp1", ".vmp2"] },
+        ProtectorSig { name: "Enigma Protector", patterns: &[".enigma1", ".enigma2"] },
+    ];
+    for p in &protectors {
+        let matched: Vec<String> = p.patterns.iter()
+            .filter(|pat| has_section(pat))
+            .map(|s| format!("section: {}", s))
             .collect();
         if !matched.is_empty() {
+            // Section name only = 0.45 (medium); corroboration can push higher
+            let mut score = if matched.len() >= 2 { 0.55f32 } else { 0.45 };
+            corroboration_bonus(&mut score);
             return Some(PackerInfo {
-                name: sig.name.into(),
-                confidence: sig.confidence,
-                evidence: matched.iter().map(|s| format!("section: {}", s)).collect(),
+                name: p.name.into(),
+                confidence: score.min(1.0),
+                evidence: matched,
+            });
+        }
+    }
+
+    // --- Other packers (section-name based, non-spoofable names) ---
+    struct SimpleSig { name: &'static str, patterns: &'static [&'static str] }
+    let simple_packers = [
+        SimpleSig { name: "PECompact", patterns: &["pec1", "pec2", "PEC2", "PEC2MO", "PEC2TO", "PECompact2"] },
+        SimpleSig { name: "NSPack", patterns: &[".nsp0", ".nsp1", ".nsp2", "nsp0", "nsp1", "nsp2"] },
+        SimpleSig { name: "Petite", patterns: &[".petite"] },
+        SimpleSig { name: "Upack", patterns: &[".Upack", ".ByDwing"] },
+        SimpleSig { name: "RLPack", patterns: &[".RLPack"] },
+    ];
+    for p in &simple_packers {
+        let matched: Vec<String> = p.patterns.iter()
+            .filter(|pat| has_section(pat))
+            .map(|s| format!("section: {}", s))
+            .collect();
+        if !matched.is_empty() {
+            let mut score = if matched.len() >= 2 { 0.65f32 } else { 0.50 };
+            corroboration_bonus(&mut score);
+            return Some(PackerInfo {
+                name: p.name.into(),
+                confidence: score.min(1.0),
+                evidence: matched,
+            });
+        }
+    }
+
+    // .packed alone is ambiguous — only report with strong corroboration
+    if has_section(".packed") {
+        let mut score = 0.25f32;
+        corroboration_bonus(&mut score);
+        if score >= 0.50 {
+            return Some(PackerInfo {
+                name: "Unknown Packer".into(),
+                confidence: score.min(1.0),
+                evidence: vec!["section: .packed (generic)".into()],
             });
         }
     }
