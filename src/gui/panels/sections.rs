@@ -1,10 +1,11 @@
 use egui::{Color32, Ui};
 use egui_extras::{Column, TableBuilder};
 
-use crate::analysis::AnalysisResult;
+use crate::analysis::{self, AnalysisResult};
 
 const ACCENT: Color32 = Color32::from_rgb(0, 210, 255);
 const LABEL: Color32 = Color32::from_rgb(120, 130, 150);
+const NONSTANDARD_BG: Color32 = Color32::from_rgb(100, 85, 0);
 
 fn entropy_color(entropy: f64) -> Color32 {
     if entropy < 6.0 {
@@ -54,7 +55,19 @@ pub fn show(ui: &mut Ui, result: &AnalysisResult) {
         .body(|mut body| {
             for sec in sections {
                 body.row(20.0, |mut row| {
-                    row.col(|ui| { ui.strong(&sec.name); });
+                    row.col(|ui| {
+                        if analysis::is_standard_section_name(&sec.name) {
+                            ui.strong(&sec.name);
+                        } else {
+                            egui::Frame::new()
+                                .fill(NONSTANDARD_BG)
+                                .inner_margin(egui::Margin::symmetric(4, 1))
+                                .corner_radius(2)
+                                .show(ui, |ui| {
+                                    ui.strong(egui::RichText::new(&sec.name).color(Color32::WHITE));
+                                });
+                        }
+                    });
                     row.col(|ui| { ui.monospace(format!("{:#010x}", sec.virtual_size)); });
                     row.col(|ui| { ui.monospace(format!("{:#010x}", sec.virtual_address)); });
                     row.col(|ui| { ui.monospace(format!("{:#010x}", sec.raw_size)); });

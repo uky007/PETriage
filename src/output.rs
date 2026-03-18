@@ -1,6 +1,6 @@
 use colored::Colorize;
 
-use crate::analysis::AnalysisResult;
+use crate::analysis::{self, AnalysisResult};
 
 pub fn print_banner() {
     let version = env!("CARGO_PKG_VERSION");
@@ -180,8 +180,13 @@ pub fn format_text(result: &AnalysisResult) -> String {
         out.push_str(&format!("  {:-<10} {:-<10} {:-<12} {:-<10} {:-<12} {:-<8} {:-<30}\n",
             "", "", "", "", "", "", ""));
         for sec in sections {
-            out.push_str(&format!("  {:<10} {:#010x} {:#012x} {:#010x} {:#012x} {:>7.4} {}\n",
-                sec.name,
+            let name_display = if analysis::is_standard_section_name(&sec.name) {
+                format!("{:<10}", sec.name)
+            } else {
+                format!("{}", format!("{:<10}", sec.name).yellow().bold())
+            };
+            out.push_str(&format!("  {} {:#010x} {:#012x} {:#010x} {:#012x} {:>7.4} {}\n",
+                name_display,
                 sec.virtual_size,
                 sec.virtual_address,
                 sec.raw_size,

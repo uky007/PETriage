@@ -3459,6 +3459,18 @@ fn calculate_entropy(data: &[u8]) -> f64 {
     entropy
 }
 
+/// Returns true if the section name is a standard/well-known PE section name.
+pub fn is_standard_section_name(name: &str) -> bool {
+    const STANDARD: &[&str] = &[
+        ".text", ".data", ".rdata", ".rsrc", ".reloc",
+        ".bss", ".idata", ".edata", ".tls", ".pdata",
+        ".CRT", ".symtab",
+        ".gopclntab", ".go.buildinfo",
+    ];
+    STANDARD.contains(&name)
+        || (name.starts_with('/') && name[1..].chars().all(|c| c.is_ascii_digit()))
+}
+
 pub fn format_timestamp(timestamp: u32) -> String {
     if timestamp == 0 {
         return "N/A".to_string();
