@@ -436,7 +436,7 @@ impl eframe::App for ReadpeApp {
                             ui.colored_label(ERROR_RED, format!("Error: {msg}"));
                         });
                     }
-                    AppState::Loaded { data, result, .. } => {
+                    AppState::Loaded { file_name, data, result } => {
                         let data = data.clone();
                         // Populate icon cache on first frame after load
                         if !self.icon_cache.populated {
@@ -509,7 +509,7 @@ impl eframe::App for ReadpeApp {
                                             Tab::Imports => panels::imports::show(ui, &result, &mut self.imports_state),
                                             Tab::Exports => panels::exports::show(ui, &result),
                                             Tab::Strings => panels::strings::show(ui, &result, &mut self.strings_state),
-                                            Tab::Overlay => panels::overlay::show(ui, &result, &data, &mut self.overlay_save_message),
+                                            Tab::Overlay => panels::overlay::show(ui, &result, &data, &file_name, &mut self.overlay_save_message),
                                             Tab::Resources => panels::resources::show(ui, &result, &self.icon_cache.all_icons),
                                             Tab::RichHeader => panels::rich_header::show(ui, &result),
                                             Tab::Tls => panels::tls::show(ui, &result),

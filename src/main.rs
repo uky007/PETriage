@@ -321,6 +321,23 @@ fn main() {
         if !overlay_info.present {
             exit_error("No overlay data found in this PE file", json_mode, 1);
         }
+        let input_canonical = fs::canonicalize(&file).unwrap_or_else(|_| file.clone());
+        // Validate output paths don't collide with input or each other
+        for out_path in [&cli.carve_overlay, &cli.strip_overlay].into_iter().flatten() {
+            if let Ok(canon) = fs::canonicalize(out_path) {
+                if canon == input_canonical {
+                    exit_error(&format!("Output path '{}' is the same as input file — refusing to overwrite", out_path.display()), json_mode, 1);
+                }
+            }
+        }
+        if let (Some(a), Some(b)) = (&cli.carve_overlay, &cli.strip_overlay) {
+            // Compare paths; for new files canonicalize won't work, so compare display strings
+            let a_resolved = fs::canonicalize(a).unwrap_or_else(|_| a.clone());
+            let b_resolved = fs::canonicalize(b).unwrap_or_else(|_| b.clone());
+            if a_resolved == b_resolved {
+                exit_error("--carve-overlay and --strip-overlay point to the same file", json_mode, 1);
+            }
+        }
         if let Some(ref path) = cli.carve_overlay {
             let overlay_bytes = &data[overlay_info.offset..overlay_info.offset + overlay_info.size];
             if let Err(e) = fs::write(path, overlay_bytes) {

@@ -7,7 +7,7 @@ const LABEL: Color32 = Color32::from_rgb(120, 130, 150);
 const WARNING: Color32 = Color32::from_rgb(230, 190, 50);
 const SUCCESS: Color32 = Color32::from_rgb(80, 200, 120);
 
-pub fn show(ui: &mut Ui, result: &AnalysisResult, data: &[u8], save_message: &mut Option<String>) {
+pub fn show(ui: &mut Ui, result: &AnalysisResult, data: &[u8], input_path: &str, save_message: &mut Option<String>) {
     let overlay = match result.overlay {
         Some(ref o) => o,
         None => {
@@ -73,10 +73,14 @@ pub fn show(ui: &mut Ui, result: &AnalysisResult, data: &[u8], save_message: &mu
                     .set_file_name(format!("overlay.{}", default_ext))
                     .add_filter("All files", &["*"]);
                 if let Some(path) = dialog.save_file() {
-                    let overlay_bytes = &data[overlay.offset..overlay.offset + overlay.size];
-                    match std::fs::write(&path, overlay_bytes) {
-                        Ok(()) => *save_message = Some(format!("Overlay saved: {} bytes → {}", overlay.size, path.display())),
-                        Err(e) => *save_message = Some(format!("Error: {}", e)),
+                    if is_same_file(&path, input_path) {
+                        *save_message = Some("Error: cannot overwrite the input file".into());
+                    } else {
+                        let overlay_bytes = &data[overlay.offset..overlay.offset + overlay.size];
+                        match std::fs::write(&path, overlay_bytes) {
+                            Ok(()) => *save_message = Some(format!("Overlay saved: {} bytes → {}", overlay.size, path.display())),
+                            Err(e) => *save_message = Some(format!("Error: {}", e)),
+                        }
                     }
                 }
             }
@@ -87,10 +91,14 @@ pub fn show(ui: &mut Ui, result: &AnalysisResult, data: &[u8], save_message: &mu
                     .add_filter("PE files", &["exe", "dll", "sys", "ocx", "scr"])
                     .add_filter("All files", &["*"]);
                 if let Some(path) = dialog.save_file() {
-                    let stripped = &data[..overlay.offset];
-                    match std::fs::write(&path, stripped) {
-                        Ok(()) => *save_message = Some(format!("Stripped PE saved: {} bytes → {} (removed {} bytes)", overlay.offset, path.display(), overlay.size)),
-                        Err(e) => *save_message = Some(format!("Error: {}", e)),
+                    if is_same_file(&path, input_path) {
+                        *save_message = Some("Error: cannot overwrite the input file".into());
+                    } else {
+                        let stripped = &data[..overlay.offset];
+                        match std::fs::write(&path, stripped) {
+                            Ok(()) => *save_message = Some(format!("Stripped PE saved: {} bytes → {} (removed {} bytes)", overlay.offset, path.display(), overlay.size)),
+                            Err(e) => *save_message = Some(format!("Error: {}", e)),
+                        }
                     }
                 }
             }
@@ -101,5 +109,14 @@ pub fn show(ui: &mut Ui, result: &AnalysisResult, data: &[u8], save_message: &mu
             let color = if msg.starts_with("Error") { WARNING } else { SUCCESS };
             ui.colored_label(color, msg);
         }
+    }
+}
+
+fn is_same_file(output: &std::path::Path, input: &str) -> bool {
+    let input_path = std::path::Path::new(input);
+    if let (Ok(a), Ok(b)) = (std::fs::canonicalize(output), std::fs::canonicalize(input_path)) {
+        a == b
+    } else {
+        false
     }
 }

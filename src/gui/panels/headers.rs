@@ -120,15 +120,21 @@ pub fn show(ui: &mut Ui, result: &AnalysisResult, data: &[u8], editor: &mut Edit
                             egui::Frame::NONE
                         };
                         combo_frame.show(ui, |ui| {
-                            egui::ComboBox::from_id_salt("machine_combo")
-                                .selected_text(format!("{} ({:#06x})", current_label, machine_current))
-                                .show_ui(ui, |ui| {
-                                    for (label, val) in machine_items {
-                                        if ui.selectable_label(machine_current == *val, format!("{} ({:#06x})", label, val)).clicked() {
-                                            editor.set_value(machine_offset, 2, machine_original, *val as u64, "Machine");
+                            ui.horizontal(|ui| {
+                                egui::ComboBox::from_id_salt("machine_combo")
+                                    .selected_text(format!("{} ({:#06x})", current_label, machine_current))
+                                    .show_ui(ui, |ui| {
+                                        for (label, val) in machine_items {
+                                            if ui.selectable_label(machine_current == *val, format!("{} ({:#06x})", label, val)).clicked() {
+                                                editor.set_value(machine_offset, 2, machine_original, *val as u64, "Machine");
+                                            }
                                         }
-                                    }
-                                });
+                                    });
+                                let mut raw = machine_current as u32;
+                                if ui.add(egui::DragValue::new(&mut raw).range(0..=0xFFFFu32).hexadecimal(4, false, true)).changed() {
+                                    editor.set_value(machine_offset, 2, machine_original, raw as u64, "Machine");
+                                }
+                            });
                         });
                         if machine_modified { ui.colored_label(FLAG_COLOR, "*"); } else { ui.label(""); }
                         ui.end_row();
@@ -278,6 +284,7 @@ pub fn show(ui: &mut Ui, result: &AnalysisResult, data: &[u8], editor: &mut Edit
                                     ("WINDOWS_CUI", 3),
                                     ("OS2_CUI", 5),
                                     ("POSIX_CUI", 7),
+                                    ("NATIVE_WINDOWS", 8),
                                     ("WINDOWS_CE_GUI", 9),
                                     ("EFI_APPLICATION", 10),
                                     ("EFI_BOOT_SERVICE_DRIVER", 11),
@@ -297,15 +304,21 @@ pub fn show(ui: &mut Ui, result: &AnalysisResult, data: &[u8], editor: &mut Edit
                                     egui::Frame::NONE
                                 };
                                 frame.show(ui, |ui| {
-                                    egui::ComboBox::from_id_salt("subsystem_combo")
-                                        .selected_text(format!("{} ({})", subsys_label, subsys_current))
-                                        .show_ui(ui, |ui| {
-                                            for (label, val) in subsys_items {
-                                                if ui.selectable_label(subsys_current == *val, format!("{} ({})", label, val)).clicked() {
-                                                    editor.set_value(subsys_offset, 2, subsys_original, *val as u64, "Subsystem");
+                                    ui.horizontal(|ui| {
+                                        egui::ComboBox::from_id_salt("subsystem_combo")
+                                            .selected_text(format!("{} ({})", subsys_label, subsys_current))
+                                            .show_ui(ui, |ui| {
+                                                for (label, val) in subsys_items {
+                                                    if ui.selectable_label(subsys_current == *val, format!("{} ({})", label, val)).clicked() {
+                                                        editor.set_value(subsys_offset, 2, subsys_original, *val as u64, "Subsystem");
+                                                    }
                                                 }
-                                            }
-                                        });
+                                            });
+                                        let mut raw = subsys_current as u32;
+                                        if ui.add(egui::DragValue::new(&mut raw).range(0..=0xFFFFu32).hexadecimal(4, false, true)).changed() {
+                                            editor.set_value(subsys_offset, 2, subsys_original, raw as u64, "Subsystem");
+                                        }
+                                    });
                                 });
                                 if subsys_modified { ui.colored_label(FLAG_COLOR, "*"); } else { ui.label(""); }
                             }

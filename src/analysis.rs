@@ -639,18 +639,7 @@ fn detect_anomalies(
 ) -> Vec<Anomaly> {
     let mut anomalies = Vec::new();
 
-    let standard_names: &[&str] = &[
-        ".text", ".data", ".rdata", ".rsrc", ".reloc",
-        ".bss", ".idata", ".edata", ".tls", ".pdata",
-        // COFF long section names (numeric references to string table)
-        ".CRT", ".symtab",
-        // Go-specific sections
-        ".gopclntab", ".go.buildinfo",
-    ];
-    // COFF string table references (/4, /19, etc.) are also standard
-    let is_coff_strtab_ref = |name: &str| -> bool {
-        name.starts_with('/') && name[1..].chars().all(|c| c.is_ascii_digit())
-    };
+    // Section name validation uses shared is_standard_section_name()
 
     // Section-based rules
     if let Some(sections) = sections {
@@ -731,7 +720,7 @@ fn detect_anomalies(
             }
 
             // Rule 15: Non-standard section name
-            if !standard_names.contains(&sec.name.as_str()) && !is_coff_strtab_ref(&sec.name) {
+            if !is_standard_section_name(&sec.name) {
                 anomalies.push(Anomaly {
                     rule_id: "STRUCT-003".into(),
                     category: "Structure".into(),
@@ -3464,11 +3453,21 @@ pub fn is_standard_section_name(name: &str) -> bool {
     const STANDARD: &[&str] = &[
         ".text", ".data", ".rdata", ".rsrc", ".reloc",
         ".bss", ".idata", ".edata", ".tls", ".pdata",
+        // MSVC / LLVM / linker-generated sections
+        ".xdata", ".didat", ".debug", ".sxdata", ".gfids",
+        ".00cfg", ".voltbl", ".gehcont",
+        // COFF long section names
         ".CRT", ".symtab",
+        // Go-specific sections
         ".gopclntab", ".go.buildinfo",
+        // Delphi / Borland
+        "CODE", "DATA", ".tls$",
     ];
     STANDARD.contains(&name)
         || (name.starts_with('/') && name[1..].chars().all(|c| c.is_ascii_digit()))
+        // .debug$S, .debug$T, .tls$ etc. — MSVC debug/TLS subsections
+        || name.starts_with(".debug$")
+        || name.starts_with(".tls$")
 }
 
 pub fn format_timestamp(timestamp: u32) -> String {
