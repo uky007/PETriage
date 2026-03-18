@@ -331,10 +331,7 @@ fn main() {
             }
         }
         if let (Some(a), Some(b)) = (&cli.carve_overlay, &cli.strip_overlay) {
-            // Compare paths; for new files canonicalize won't work, so compare display strings
-            let a_resolved = fs::canonicalize(a).unwrap_or_else(|_| a.clone());
-            let b_resolved = fs::canonicalize(b).unwrap_or_else(|_| b.clone());
-            if a_resolved == b_resolved {
+            if resolve_path(a) == resolve_path(b) {
                 exit_error("--carve-overlay and --strip-overlay point to the same file", json_mode, 1);
             }
         }
@@ -406,6 +403,21 @@ fn main() {
         && check_fail_on(&result, threshold) {
             process::exit(3);
         }
+}
+
+/// Resolve a path to an absolute, normalized form.
+/// For existing files, uses canonicalize(). For new files, canonicalizes the
+/// parent directory and appends the file name, handling ./out.bin vs out.bin
+/// and foo/../out.bin vs out.bin correctly.
+fn resolve_path(p: &PathBuf) -> PathBuf {
+    if let Ok(canon) = fs::canonicalize(p) {
+        return canon;
+    }
+    let parent = p.parent().unwrap_or_else(|| std::path::Path::new("."));
+    let file_name = p.file_name().unwrap_or_default();
+    let resolved_parent = fs::canonicalize(parent)
+        .unwrap_or_else(|_| std::path::absolute(parent).unwrap_or_else(|_| parent.to_path_buf()));
+    resolved_parent.join(file_name)
 }
 
 fn exit_error(message: &str, json_mode: bool, code: i32) -> ! {
