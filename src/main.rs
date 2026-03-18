@@ -82,6 +82,14 @@ struct Cli {
     #[arg(short = 'o', long)]
     output: Option<PathBuf>,
 
+    /// Save overlay data to a file (carve)
+    #[arg(long, value_name = "FILE")]
+    carve_overlay: Option<PathBuf>,
+
+    /// Save PE without overlay data (strip)
+    #[arg(long, value_name = "FILE")]
+    strip_overlay: Option<PathBuf>,
+
     /// Launch interactive TUI hex viewer
     #[cfg(feature = "tui")]
     #[arg(short = 'x', long = "view")]
@@ -303,6 +311,34 @@ fn main() {
         let file_name = file.display().to_string();
         if let Err(e) = tui::run(&data, &pe, &file_name) {
             exit_error(&format!("TUI failed: {}", e), json_mode, 1);
+        }
+        return;
+    }
+
+    // Overlay carve / strip operations
+    if cli.carve_overlay.is_some() || cli.strip_overlay.is_some() {
+        let overlay_info = analysis::detect_overlay_public(&data, &pe);
+        if !overlay_info.present {
+            exit_error("No overlay data found in this PE file", json_mode, 1);
+        }
+        if let Some(ref path) = cli.carve_overlay {
+            let overlay_bytes = &data[overlay_info.offset..overlay_info.offset + overlay_info.size];
+            if let Err(e) = fs::write(path, overlay_bytes) {
+                exit_error(&format!("Failed to write overlay to '{}': {}", path.display(), e), json_mode, 2);
+            }
+            if !json_mode {
+                println!("Overlay carved: {} bytes written to {}", overlay_info.size, path.display());
+            }
+        }
+        if let Some(ref path) = cli.strip_overlay {
+            let stripped = &data[..overlay_info.offset];
+            if let Err(e) = fs::write(path, stripped) {
+                exit_error(&format!("Failed to write stripped PE to '{}': {}", path.display(), e), json_mode, 2);
+            }
+            if !json_mode {
+                println!("PE stripped: {} bytes written to {} (removed {} bytes overlay)",
+                    overlay_info.offset, path.display(), overlay_info.size);
+            }
         }
         return;
     }

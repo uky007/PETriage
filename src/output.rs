@@ -258,6 +258,18 @@ pub fn format_text(result: &AnalysisResult) -> String {
     if let Some(ref exports) = result.exports
         && !exports.is_empty() {
             out.push_str(&format!("=== Exports ({}) ===\n", exports.len()));
+            if let Some(ref ed) = result.export_directory {
+                out.push_str(&format!("  DLL Name:    {}\n", ed.dll_name));
+                if ed.timestamp_anomaly {
+                    out.push_str(&format!("  Timestamp:   {}\n",
+                        format!("{:#010x} — {}", ed.timestamp, ed.timestamp_str).red().bold()));
+                } else {
+                    out.push_str(&format!("  Timestamp:   {:#010x} ({})\n", ed.timestamp, ed.timestamp_str));
+                }
+                out.push_str(&format!("  Functions:   {}  Names: {}  OrdinalBase: {}\n",
+                    ed.number_of_functions, ed.number_of_names, ed.ordinal_base));
+                out.push('\n');
+            }
             out.push_str(&format!("  {:<6} {:<12} {}\n", "Ord", "RVA", "Name"));
             out.push_str(&format!("  {:-<6} {:-<12} {:-<30}\n", "", "", ""));
             for exp in exports {

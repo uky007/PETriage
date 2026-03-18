@@ -149,6 +149,7 @@ struct ReadpeApp {
     strings_state: StringsState,
     icon_cache: IconCache,
     editor_state: EditorState,
+    overlay_save_message: Option<String>,
 }
 
 impl Default for ReadpeApp {
@@ -161,6 +162,7 @@ impl Default for ReadpeApp {
             strings_state: StringsState::default(),
             icon_cache: IconCache::default(),
             editor_state: EditorState::default(),
+            overlay_save_message: None,
         }
     }
 }
@@ -192,6 +194,7 @@ impl ReadpeApp {
                         self.strings_state = StringsState::default();
                         self.icon_cache = IconCache::default();
                         self.editor_state = EditorState::default();
+                        self.overlay_save_message = None;
                         self.state = AppState::Loaded {
                             file_name,
                             data,
@@ -506,7 +509,7 @@ impl eframe::App for ReadpeApp {
                                             Tab::Imports => panels::imports::show(ui, &result, &mut self.imports_state),
                                             Tab::Exports => panels::exports::show(ui, &result),
                                             Tab::Strings => panels::strings::show(ui, &result, &mut self.strings_state),
-                                            Tab::Overlay => panels::overlay::show(ui, &result),
+                                            Tab::Overlay => panels::overlay::show(ui, &result, &data, &mut self.overlay_save_message),
                                             Tab::Resources => panels::resources::show(ui, &result, &self.icon_cache.all_icons),
                                             Tab::RichHeader => panels::rich_header::show(ui, &result),
                                             Tab::Tls => panels::tls::show(ui, &result),

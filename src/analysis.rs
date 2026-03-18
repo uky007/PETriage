@@ -42,6 +42,8 @@ pub struct AnalysisResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub imports: Option<Vec<ImportEntry>>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub export_directory: Option<ExportDirectoryInfo>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub exports: Option<Vec<ExportEntry>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub strings: Option<Vec<StringEntry>>,
@@ -185,6 +187,17 @@ pub struct Anomaly {
     pub evidence: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub threshold: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ExportDirectoryInfo {
+    pub dll_name: String,
+    pub number_of_functions: u32,
+    pub number_of_names: u32,
+    pub ordinal_base: u32,
+    pub timestamp: u32,
+    pub timestamp_str: String,
+    pub timestamp_anomaly: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -479,6 +492,12 @@ pub fn analyze(data: &[u8], pe: &PE, opts: &AnalysisOptions) -> AnalysisResult {
         None
     };
 
+    let export_directory = if opts.show_exports {
+        parse_export_directory(pe)
+    } else {
+        None
+    };
+
     let exports = if opts.show_exports {
         Some(parse_exports(pe))
     } else {
@@ -533,9 +552,13 @@ pub fn analyze(data: &[u8], pe: &PE, opts: &AnalysisOptions) -> AnalysisResult {
 
     let suspicious_summary = imports.as_ref().map(|imp| build_suspicious_summary(imp));
 
+    let export_dir_timestamp = pe.export_data
+        .as_ref()
+        .map(|d| d.export_directory_table.time_date_stamp);
+
     let mut anomalies_vec = detect_anomalies(
         &sections, &coff_header, &optional_header, &overlay_for_anomalies, &suspicious_summary, &debug,
-        &rich_header_parsed, &imports,
+        &rich_header_parsed, &imports, export_dir_timestamp,
     );
 
     // OPSEC detection (OPSEC-002 through OPSEC-008)
@@ -584,6 +607,7 @@ pub fn analyze(data: &[u8], pe: &PE, opts: &AnalysisOptions) -> AnalysisResult {
         optional_header,
         sections,
         imports,
+        export_directory,
         exports,
         strings: display_strings,
         hashes,
@@ -611,6 +635,7 @@ fn detect_anomalies(
     debug: &Option<DebugInfo>,
     rich_header: &Option<RichHeaderInfo>,
     imports: &Option<Vec<ImportEntry>>,
+    export_dir_timestamp: Option<u32>,
 ) -> Vec<Anomaly> {
     let mut anomalies = Vec::new();
 
@@ -1006,6 +1031,35 @@ fn detect_anomalies(
                 });
             }
         }
+
+    // EXPORT-001: Anomalous Export Directory timestamp
+    // 0xFFFFFFFF is not a valid build timestamp.
+    // 0 is also unusual for DLLs that export functions.
+    if let Some(ts) = export_dir_timestamp {
+        if ts == 0xFFFFFFFF {
+            anomalies.push(Anomaly {
+                rule_id: "EXPORT-001".into(),
+                category: "Export".into(),
+                severity: "warning".into(),
+                description: "Export Directory timestamp is 0xFFFFFFFF — invalid value".into(),
+                evidence: Some(format!("timestamp={:#010x}", ts)),
+                threshold: None,
+            });
+        } else if ts == 0 {
+            // export_dir_timestamp is Some only when export_data exists, so exports are present.
+            // ts=0 with actual exports is unusual but less suspicious than 0xFFFFFFFF.
+            {
+                anomalies.push(Anomaly {
+                    rule_id: "EXPORT-001".into(),
+                    category: "Export".into(),
+                    severity: "info".into(),
+                    description: "Export Directory timestamp is zero — may indicate non-standard build process".into(),
+                    evidence: Some(format!("timestamp={:#010x}", ts)),
+                    threshold: None,
+                });
+            }
+        }
+    }
 
     anomalies
 }
@@ -3113,6 +3167,29 @@ fn build_suspicious_summary(imports: &[ImportEntry]) -> SuspiciousSummary {
     }
 }
 
+fn parse_export_directory(pe: &PE) -> Option<ExportDirectoryInfo> {
+    let ed = pe.export_data.as_ref()?;
+    let dt = &ed.export_directory_table;
+    let ts = dt.time_date_stamp;
+    let timestamp_str = if ts == 0xFFFFFFFF {
+        "invalid value".into()
+    } else if ts == 0 {
+        "zero".into()
+    } else {
+        format_timestamp(ts)
+    };
+    let timestamp_anomaly = ts == 0xFFFFFFFF || ts == 0;
+    Some(ExportDirectoryInfo {
+        dll_name: ed.name.unwrap_or("(unknown)").to_string(),
+        number_of_functions: dt.address_table_entries,
+        number_of_names: dt.number_of_name_pointers,
+        ordinal_base: dt.ordinal_base,
+        timestamp: ts,
+        timestamp_str,
+        timestamp_anomaly,
+    })
+}
+
 fn parse_exports(pe: &PE) -> Vec<ExportEntry> {
     let ordinal_base = pe.export_data
         .as_ref()
@@ -3284,6 +3361,11 @@ fn compute_imphash(pe: &PE) -> Option<String> {
     let mut hasher = Md5::new();
     Digest::update(&mut hasher, joined.as_bytes());
     Some(format!("{:x}", hasher.finalize()))
+}
+
+/// Public wrapper for overlay detection (used by CLI carve/strip commands).
+pub fn detect_overlay_public(data: &[u8], pe: &PE) -> OverlayInfo {
+    detect_overlay(data, pe)
 }
 
 fn detect_overlay(data: &[u8], pe: &PE) -> OverlayInfo {

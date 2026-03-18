@@ -2838,3 +2838,181 @@ fn packer_pecompact_single_section_no_dedup_inflation() {
     assert_eq!(evidence.len(), 1,
         "PEC2 single section should produce 1 evidence, got: {:?}", evidence);
 }
+
+// --- Export Directory timestamp anomaly tests ---
+
+fn build_pe_with_export_timestamp(timestamp: u32) -> Vec<u8> {
+    // Reuse the export PE fixture from export_ordinal_structure_valid
+    // but set the Export Directory timestamp field
+    let mut data = vec![0u8; 0x400];
+    data[0] = b'M'; data[1] = b'Z';
+    data[0x3C..0x40].copy_from_slice(&0x80u32.to_le_bytes());
+    data[0x80] = b'P'; data[0x81] = b'E';
+    data[0x84..0x86].copy_from_slice(&0x014Cu16.to_le_bytes());
+    data[0x86..0x88].copy_from_slice(&1u16.to_le_bytes());
+    data[0x94..0x96].copy_from_slice(&0xE0u16.to_le_bytes());
+    data[0x96..0x98].copy_from_slice(&0x0102u16.to_le_bytes());
+    data[0x98..0x9A].copy_from_slice(&0x010Bu16.to_le_bytes());
+    data[0xA8..0xAC].copy_from_slice(&0x1000u32.to_le_bytes());
+    data[0xB4..0xB8].copy_from_slice(&0x400000u32.to_le_bytes());
+    data[0xB8..0xBC].copy_from_slice(&0x1000u32.to_le_bytes());
+    data[0xBC..0xC0].copy_from_slice(&0x200u32.to_le_bytes());
+    data[0xC0..0xC2].copy_from_slice(&4u16.to_le_bytes());
+    data[0xC8..0xCA].copy_from_slice(&4u16.to_le_bytes());
+    data[0xD0..0xD4].copy_from_slice(&0x3000u32.to_le_bytes());
+    data[0xD4..0xD8].copy_from_slice(&0x200u32.to_le_bytes());
+    data[0xDC..0xDE].copy_from_slice(&3u16.to_le_bytes());
+    data[0xF4..0xF8].copy_from_slice(&16u32.to_le_bytes());
+    data[0xF8..0xFC].copy_from_slice(&0x1000u32.to_le_bytes());
+    data[0xFC..0x100].copy_from_slice(&0x80u32.to_le_bytes());
+    let sh = 0x178;
+    data[sh..sh + 7].copy_from_slice(b".edata\0");
+    data[sh + 8..sh + 12].copy_from_slice(&0x100u32.to_le_bytes());
+    data[sh + 12..sh + 16].copy_from_slice(&0x1000u32.to_le_bytes());
+    data[sh + 16..sh + 20].copy_from_slice(&0x200u32.to_le_bytes());
+    data[sh + 20..sh + 24].copy_from_slice(&0x200u32.to_le_bytes());
+    data[sh + 36..sh + 40].copy_from_slice(&0x40000040u32.to_le_bytes());
+    let ed = 0x200;
+    // TimeDateStamp at offset 4 in Export Directory
+    data[ed + 4..ed + 8].copy_from_slice(&timestamp.to_le_bytes());
+    data[ed + 12..ed + 16].copy_from_slice(&0x1050u32.to_le_bytes());
+    data[ed + 16..ed + 20].copy_from_slice(&1u32.to_le_bytes());
+    data[ed + 20..ed + 24].copy_from_slice(&2u32.to_le_bytes());
+    data[ed + 24..ed + 28].copy_from_slice(&2u32.to_le_bytes());
+    data[ed + 28..ed + 32].copy_from_slice(&0x1028u32.to_le_bytes());
+    data[ed + 32..ed + 36].copy_from_slice(&0x1030u32.to_le_bytes());
+    data[ed + 36..ed + 40].copy_from_slice(&0x1038u32.to_le_bytes());
+    data[0x228..0x22C].copy_from_slice(&0x2000u32.to_le_bytes());
+    data[0x22C..0x230].copy_from_slice(&0x2010u32.to_le_bytes());
+    data[0x230..0x234].copy_from_slice(&0x1060u32.to_le_bytes());
+    data[0x234..0x238].copy_from_slice(&0x106Au32.to_le_bytes());
+    data[0x238..0x23A].copy_from_slice(&0u16.to_le_bytes());
+    data[0x23A..0x23C].copy_from_slice(&1u16.to_le_bytes());
+    data[0x250..0x259].copy_from_slice(b"test.dll\0");
+    data[0x260..0x266].copy_from_slice(b"Func1\0");
+    data[0x26A..0x270].copy_from_slice(b"Func2\0");
+    data
+}
+
+#[test]
+fn export_001_fires_on_ffffffff_timestamp() {
+    let data = build_pe_with_export_timestamp(0xFFFFFFFF);
+    let output = petriage_run(&data);
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let val: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let anomalies = val["anomalies"].as_array().expect("should have anomalies");
+    let export_001 = anomalies.iter().find(|a| a["rule_id"] == "EXPORT-001");
+    assert!(export_001.is_some(), "EXPORT-001 should fire for timestamp 0xFFFFFFFF");
+    let a = export_001.unwrap();
+    assert_eq!(a["severity"], "warning");
+    assert!(a["description"].as_str().unwrap().contains("invalid value"));
+}
+
+#[test]
+fn export_001_fires_on_zero_timestamp() {
+    let data = build_pe_with_export_timestamp(0);
+    let output = petriage_run(&data);
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let val: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let anomalies = val["anomalies"].as_array().expect("should have anomalies");
+    let export_001 = anomalies.iter().find(|a| a["rule_id"] == "EXPORT-001");
+    assert!(export_001.is_some(), "EXPORT-001 should fire for timestamp 0");
+    assert_eq!(export_001.unwrap()["severity"], "info");
+}
+
+#[test]
+fn export_001_does_not_fire_on_valid_timestamp() {
+    let data = build_pe_with_export_timestamp(0x5A1C8B00);
+    let output = petriage_run(&data);
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let val: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let anomalies = val["anomalies"].as_array().expect("should have anomalies");
+    let export_001 = anomalies.iter().find(|a| a["rule_id"] == "EXPORT-001");
+    assert!(export_001.is_none(), "EXPORT-001 should not fire for valid timestamp");
+}
+
+// --- Overlay carve/strip tests ---
+
+#[test]
+fn carve_overlay_saves_overlay_bytes() {
+    let mut data = build_pe_with_pdb_path("test.pdb");
+    // Append overlay data
+    let overlay_data = b"OVERLAY_DATA_12345";
+    data.extend_from_slice(overlay_data);
+
+    let id = COUNTER.fetch_add(1, Ordering::SeqCst);
+    let pid = std::process::id();
+    let dir = std::env::temp_dir();
+    let input_path = dir.join(format!("petriage_carve_in_{}_{}.bin", pid, id));
+    let output_path = dir.join(format!("petriage_carve_out_{}_{}.bin", pid, id));
+    std::fs::write(&input_path, &data).unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_petriage"))
+        .arg("--carve-overlay")
+        .arg(&output_path)
+        .arg(&input_path)
+        .output()
+        .expect("failed to run petriage");
+
+    assert_eq!(output.status.code(), Some(0), "carve should succeed");
+    let carved = std::fs::read(&output_path).expect("carved file should exist");
+    assert_eq!(&carved, overlay_data, "carved data should match overlay");
+
+    let _ = std::fs::remove_file(&input_path);
+    let _ = std::fs::remove_file(&output_path);
+}
+
+#[test]
+fn strip_overlay_removes_overlay() {
+    let mut data = build_pe_with_pdb_path("test.pdb");
+    let pe_size = data.len();
+    data.extend_from_slice(b"OVERLAY_JUNK_DATA");
+
+    let id = COUNTER.fetch_add(1, Ordering::SeqCst);
+    let pid = std::process::id();
+    let dir = std::env::temp_dir();
+    let input_path = dir.join(format!("petriage_strip_in_{}_{}.bin", pid, id));
+    let output_path = dir.join(format!("petriage_strip_out_{}_{}.bin", pid, id));
+    std::fs::write(&input_path, &data).unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_petriage"))
+        .arg("--strip-overlay")
+        .arg(&output_path)
+        .arg(&input_path)
+        .output()
+        .expect("failed to run petriage");
+
+    assert_eq!(output.status.code(), Some(0), "strip should succeed");
+    let stripped = std::fs::read(&output_path).expect("stripped file should exist");
+    assert_eq!(stripped.len(), pe_size, "stripped PE should be original size without overlay");
+    assert_eq!(&stripped, &data[..pe_size], "stripped PE content should match original PE");
+
+    let _ = std::fs::remove_file(&input_path);
+    let _ = std::fs::remove_file(&output_path);
+}
+
+#[test]
+fn carve_overlay_fails_without_overlay() {
+    let data = build_pe_with_pdb_path("test.pdb");
+    let id = COUNTER.fetch_add(1, Ordering::SeqCst);
+    let pid = std::process::id();
+    let dir = std::env::temp_dir();
+    let input_path = dir.join(format!("petriage_nooverlay_{}_{}.bin", pid, id));
+    let output_path = dir.join(format!("petriage_nooverlay_out_{}_{}.bin", pid, id));
+    std::fs::write(&input_path, &data).unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_petriage"))
+        .arg("--carve-overlay")
+        .arg(&output_path)
+        .arg(&input_path)
+        .output()
+        .expect("failed to run petriage");
+
+    assert_eq!(output.status.code(), Some(1), "should fail with exit 1 when no overlay");
+
+    let _ = std::fs::remove_file(&input_path);
+    let _ = std::fs::remove_file(&output_path);
+}
