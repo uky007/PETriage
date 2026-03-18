@@ -3459,7 +3459,7 @@ fn calculate_entropy(data: &[u8]) -> f64 {
     entropy
 }
 
-fn format_timestamp(timestamp: u32) -> String {
+pub fn format_timestamp(timestamp: u32) -> String {
     if timestamp == 0 {
         return "N/A".to_string();
     }

@@ -1,6 +1,6 @@
 use egui::{Color32, Ui};
 
-use crate::analysis::AnalysisResult;
+use crate::analysis::{self, AnalysisResult};
 use super::editor::EditorState;
 
 const ACCENT: Color32 = Color32::from_rgb(0, 210, 255);
@@ -96,9 +96,41 @@ pub fn show(ui: &mut Ui, result: &AnalysisResult, data: &[u8], editor: &mut Edit
                     .num_columns(3)
                     .spacing([16.0, 4.0])
                     .show(ui, |ui| {
-                        ui.colored_label(LABEL, "Machine:");
-                        ui.monospace(format!("{} ({:#06x})", coff.machine, coff.machine_raw));
-                        ui.label("");
+                        // Machine — editable dropdown
+                        let machine_offset = coff_offset;
+                        let machine_original = read_u16_le(data, machine_offset) as u64;
+                        let machine_current = editor.get_current_u16(data, machine_offset);
+                        let machine_modified = editor.find_edit(machine_offset).is_some();
+                        ui.colored_label(if machine_modified { Color32::from_rgb(255, 200, 50) } else { LABEL }, "Machine:");
+                        let machine_items: &[(&str, u16)] = &[
+                            ("IMAGE_FILE_MACHINE_I386 (x86)", 0x014C),
+                            ("IMAGE_FILE_MACHINE_AMD64 (x64)", 0x8664),
+                            ("IMAGE_FILE_MACHINE_ARM", 0x01C0),
+                            ("IMAGE_FILE_MACHINE_ARMNT (ARMv7)", 0x01C4),
+                            ("IMAGE_FILE_MACHINE_ARM64 (AArch64)", 0xAA64),
+                            ("IMAGE_FILE_MACHINE_IA64 (Itanium)", 0x0200),
+                        ];
+                        let current_label = machine_items.iter()
+                            .find(|(_, v)| *v == machine_current)
+                            .map(|(l, _)| *l)
+                            .unwrap_or("Unknown");
+                        let combo_frame = if machine_modified {
+                            egui::Frame::new().fill(MODIFIED_BG).corner_radius(egui::CornerRadius::same(2)).inner_margin(egui::Margin::symmetric(2, 0))
+                        } else {
+                            egui::Frame::NONE
+                        };
+                        combo_frame.show(ui, |ui| {
+                            egui::ComboBox::from_id_salt("machine_combo")
+                                .selected_text(format!("{} ({:#06x})", current_label, machine_current))
+                                .show_ui(ui, |ui| {
+                                    for (label, val) in machine_items {
+                                        if ui.selectable_label(machine_current == *val, format!("{} ({:#06x})", label, val)).clicked() {
+                                            editor.set_value(machine_offset, 2, machine_original, *val as u64, "Machine");
+                                        }
+                                    }
+                                });
+                        });
+                        if machine_modified { ui.colored_label(FLAG_COLOR, "*"); } else { ui.label(""); }
                         ui.end_row();
 
                         ui.colored_label(LABEL, "NumberOfSections:");
@@ -106,7 +138,30 @@ pub fn show(ui: &mut Ui, result: &AnalysisResult, data: &[u8], editor: &mut Edit
                         ui.label("");
                         ui.end_row();
 
-                        edit_u32_hex(ui, data, editor, coff_offset + 4, "TimeDateStamp");
+                        // TimeDateStamp — hex editor + human-readable date
+                        {
+                            let ts_offset = coff_offset + 4;
+                            let ts_original = read_u32_le(data, ts_offset) as u64;
+                            let ts_current = editor.get_current_u32(data, ts_offset);
+                            let is_modified = editor.find_edit(ts_offset).is_some();
+                            ui.colored_label(if is_modified { Color32::from_rgb(255, 200, 50) } else { LABEL }, "TimeDateStamp:");
+                            let frame = if is_modified {
+                                egui::Frame::new().fill(MODIFIED_BG).corner_radius(egui::CornerRadius::same(2)).inner_margin(egui::Margin::symmetric(2, 0))
+                            } else {
+                                egui::Frame::NONE
+                            };
+                            frame.show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    let mut val = ts_current;
+                                    if ui.add(egui::DragValue::new(&mut val).range(0..=u32::MAX).hexadecimal(8, false, true)).changed() {
+                                        editor.set_value(ts_offset, 4, ts_original, val as u64, "TimeDateStamp");
+                                    }
+                                    let ts_str = analysis::format_timestamp(ts_current);
+                                    ui.colored_label(Color32::from_rgb(160, 170, 190), format!("({})", ts_str));
+                                });
+                            });
+                            if is_modified { ui.colored_label(FLAG_COLOR, "*"); } else { ui.label(""); }
+                        }
                         ui.end_row();
 
                         ui.colored_label(LABEL, "PointerToSymbolTable:");
@@ -210,12 +265,50 @@ pub fn show(ui: &mut Ui, result: &AnalysisResult, data: &[u8], editor: &mut Edit
                             edit_u32_hex(ui, data, editor, opt_offset + 64, "CheckSum");
                             ui.end_row();
 
-                            let subsys_offset = opt_offset + 68;
-                            let subsys_val = editor.get_current_u16(data, subsys_offset);
-                            let subsys_label = match subsys_val {
-                                1 => "NATIVE", 2 => "WINDOWS_GUI", 3 => "WINDOWS_CUI", _ => "Other",
-                            };
-                            edit_u16_hex(ui, data, editor, subsys_offset, &format!("Subsystem ({})", subsys_label));
+                            // Subsystem — editable dropdown
+                            {
+                                let subsys_offset = opt_offset + 68;
+                                let subsys_original = read_u16_le(data, subsys_offset) as u64;
+                                let subsys_current = editor.get_current_u16(data, subsys_offset);
+                                let subsys_modified = editor.find_edit(subsys_offset).is_some();
+                                let subsys_items: &[(&str, u16)] = &[
+                                    ("UNKNOWN", 0),
+                                    ("NATIVE", 1),
+                                    ("WINDOWS_GUI", 2),
+                                    ("WINDOWS_CUI", 3),
+                                    ("OS2_CUI", 5),
+                                    ("POSIX_CUI", 7),
+                                    ("WINDOWS_CE_GUI", 9),
+                                    ("EFI_APPLICATION", 10),
+                                    ("EFI_BOOT_SERVICE_DRIVER", 11),
+                                    ("EFI_RUNTIME_DRIVER", 12),
+                                    ("EFI_ROM", 13),
+                                    ("XBOX", 14),
+                                    ("WINDOWS_BOOT_APPLICATION", 16),
+                                ];
+                                let subsys_label = subsys_items.iter()
+                                    .find(|(_, v)| *v == subsys_current)
+                                    .map(|(l, _)| *l)
+                                    .unwrap_or("Unknown");
+                                ui.colored_label(if subsys_modified { Color32::from_rgb(255, 200, 50) } else { LABEL }, "Subsystem:");
+                                let frame = if subsys_modified {
+                                    egui::Frame::new().fill(MODIFIED_BG).corner_radius(egui::CornerRadius::same(2)).inner_margin(egui::Margin::symmetric(2, 0))
+                                } else {
+                                    egui::Frame::NONE
+                                };
+                                frame.show(ui, |ui| {
+                                    egui::ComboBox::from_id_salt("subsystem_combo")
+                                        .selected_text(format!("{} ({})", subsys_label, subsys_current))
+                                        .show_ui(ui, |ui| {
+                                            for (label, val) in subsys_items {
+                                                if ui.selectable_label(subsys_current == *val, format!("{} ({})", label, val)).clicked() {
+                                                    editor.set_value(subsys_offset, 2, subsys_original, *val as u64, "Subsystem");
+                                                }
+                                            }
+                                        });
+                                });
+                                if subsys_modified { ui.colored_label(FLAG_COLOR, "*"); } else { ui.label(""); }
+                            }
                             ui.end_row();
 
                             edit_u16_hex(ui, data, editor, opt_offset + 70, "DllCharacteristics");
