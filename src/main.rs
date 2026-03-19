@@ -418,13 +418,20 @@ fn resolve_path(p: &PathBuf) -> PathBuf {
 }
 
 /// Lexically normalize an absolute path by resolving `.` and `..` components.
+/// RootDir and Prefix components are never popped, so `..` cannot escape the root.
 fn normalize_lexical(p: &std::path::Path) -> PathBuf {
-    let mut parts: Vec<std::ffi::OsString> = Vec::new();
+    use std::path::Component;
+    let mut parts: Vec<Component> = Vec::new();
     for component in p.components() {
         match component {
-            std::path::Component::CurDir => {}
-            std::path::Component::ParentDir => { parts.pop(); }
-            other => parts.push(other.as_os_str().to_owned()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                // Only pop Normal components; never pop RootDir or Prefix
+                if let Some(Component::Normal(_)) = parts.last() {
+                    parts.pop();
+                }
+            }
+            other => parts.push(other),
         }
     }
     parts.iter().collect()
