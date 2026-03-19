@@ -405,19 +405,29 @@ fn main() {
         }
 }
 
-/// Resolve a path to an absolute, normalized form.
-/// For existing files, uses canonicalize(). For new files, canonicalizes the
-/// parent directory and appends the file name, handling ./out.bin vs out.bin
-/// and foo/../out.bin vs out.bin correctly.
+/// Resolve a path to an absolute, lexically normalized form.
+/// For existing files, uses canonicalize(). For new files, makes the path
+/// absolute and then removes `.` and `..` components lexically, so that
+/// `./out.bin`, `out.bin`, and `foo/../out.bin` all resolve identically.
 fn resolve_path(p: &PathBuf) -> PathBuf {
     if let Ok(canon) = fs::canonicalize(p) {
         return canon;
     }
-    let parent = p.parent().unwrap_or_else(|| std::path::Path::new("."));
-    let file_name = p.file_name().unwrap_or_default();
-    let resolved_parent = fs::canonicalize(parent)
-        .unwrap_or_else(|_| std::path::absolute(parent).unwrap_or_else(|_| parent.to_path_buf()));
-    resolved_parent.join(file_name)
+    let abs = std::path::absolute(p).unwrap_or_else(|_| p.clone());
+    normalize_lexical(&abs)
+}
+
+/// Lexically normalize an absolute path by resolving `.` and `..` components.
+fn normalize_lexical(p: &std::path::Path) -> PathBuf {
+    let mut parts: Vec<std::ffi::OsString> = Vec::new();
+    for component in p.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => { parts.pop(); }
+            other => parts.push(other.as_os_str().to_owned()),
+        }
+    }
+    parts.iter().collect()
 }
 
 fn exit_error(message: &str, json_mode: bool, code: i32) -> ! {
