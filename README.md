@@ -27,7 +27,7 @@ Formerly `readpe` (renamed to avoid naming collisions with existing tools).
 |-----------|-------|-------------|
 | **CLI** | `cargo build --release` | Default workflow for PE triage, structured output, anomaly detection, and batch automation. |
 | **TUI** | `cargo build --release --features tui` | Interactive hex viewer with PE region navigation. |
-| **GUI** | `cargo build --release --features gui` | Tabbed analysis, drag & drop, import/string filters, entropy color-coding, PE header editor. |
+| **GUI** | `cargo build --release --features gui` | Tabbed analysis, drag & drop, import/string filters, entropy color-coding, PE header editor, overlay carve/strip. |
 
 ## Quick Install
 
@@ -60,6 +60,8 @@ petriage <file.exe> --hashes     # File hashes only
 petriage <file.exe> --json       # JSON output
 petriage --batch <dir> --ndjson  # Batch-analyze all PEs in a directory
 petriage <file.exe> --fail-on warning  # Exit code 3 if anomalies meet the selected threshold
+petriage <file.exe> --strip-overlay stripped.exe  # Save PE without overlay
+petriage <file.exe> --carve-overlay overlay.bin   # Extract overlay data
 ```
 
 ```
@@ -69,6 +71,16 @@ petriage-gui <file.exe>          # GUI (open file directly)
 ```
 
 See [docs/usage.md](docs/usage.md) for full CLI options, `jq` recipes, TUI/GUI details, and example output.
+
+## Key Features
+
+- **25 anomaly rules** -- Packing, code injection, timestamp manipulation, structural anomalies, OPSEC leaks, Rich Header tampering, Export Directory anomalies
+- **OPSEC analysis** -- PDB paths, credential patterns, endpoint detection, CI/CD path hints, source path username leaks
+- **Build fingerprinting** -- .NET / Go / Rust / MSVC / MinGW detection with packer identification (UPX, Themida, VMProtect, NSIS, etc.)
+- **Overlay carve/strip** -- Extract overlay data or save PE without overlay (CLI and GUI)
+- **Export Directory analysis** -- DLL name, timestamp, function counts with anomalous timestamp detection
+- **Semantic header editing** (GUI) -- Machine/Subsystem dropdowns, human-readable timestamps, DllCharacteristics flag checkboxes
+- **Non-standard section highlighting** -- Yellow highlight for unusual section names in CLI and GUI
 
 ## Screenshots
 
