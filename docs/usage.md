@@ -156,3 +156,27 @@ PETriage detects known packers via multi-signal scoring: section name constellat
 **GUI:**
 
 ![Packer Detection GUI](../images/petriage_gui_packer_detect_v0.4.1.png)
+
+## What's New
+
+### v0.5.0: Semantic Header Display & Export Timestamp Anomaly
+
+#### 1.  **Headers tab** now renders Machine and Subsystem fields as human-readable dropdowns (with raw hex fallback), and TimeDateStamp shows the decoded UTC date alongside the raw value. Header fields and flags are directly editable — typical use cases:
+
+- **Fix load address for debugging** — Uncheck `DYNAMIC_BASE (ASLR)` and `HIGH_ENTROPY_VA` in DllCharacteristics Flags to pin the load address to ImageBase
+- **Disable DEP** — Uncheck `NX_COMPAT (DEP)` to allow code execution on the stack and heap
+
+    After editing, use **Save As** to write the patched PE to disk.
+
+![Headers Semantic Display](../images/petriage_gui_headers_semantics_v0.5.0.png)
+
+#### 2. **Exports tab** shows Export Directory metadata (DLL name, timestamp, function count). An invalid or anomalous timestamp (e.g. `0xFFFFFFFF`) is highlighted in red for immediate visual triage.
+
+![Export Timestamp Anomaly](../images/petriage_gui_anomary_timestamp_v0.5.0.png)
+
+#### Other changes
+
+- Overlay carve/strip support: `--carve-overlay` / `--strip-overlay` CLI flags and GUI buttons
+- Non-standard section names highlighted in yellow (CLI bold yellow, GUI yellow background)
+- Self-overwrite protection for overlay output paths (input file match and carve-strip same-target detection with lexical normalization)
+- `is_standard_section_name()`, `format_timestamp()`, `detect_overlay_public()` are now public API
