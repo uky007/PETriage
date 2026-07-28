@@ -4,7 +4,7 @@
 
 # PETriage
 
-[![Black Hat USA Arsenal 2026](https://img.shields.io/badge/Black%20Hat%20USA-Arsenal%202026-CB0000?labelColor=000000)](https://www.blackhat.com/us-26/arsenal/schedule/index.html)
+[![Black Hat USA Arsenal 2026](https://img.shields.io/badge/Black%20Hat%20USA-Arsenal%202026-CB0000?labelColor=000000)](https://blackhat.com/us-26/arsenal/schedule/index.html#petriage-cross-platform-pe-surface-analysis-for-malware-triage-51977)
 [![Crates.io](https://img.shields.io/crates/v/petriage.svg)](https://crates.io/crates/petriage)
 [![Docs.rs](https://docs.rs/petriage/badge.svg)](https://docs.rs/petriage)
 [![License](https://img.shields.io/crates/l/petriage.svg)](https://github.com/uky007/PETriage)
@@ -15,7 +15,7 @@ Designed for analysts who need practical PE triage on Linux, macOS, and Windows 
 
 Formerly `readpe` (renamed to avoid naming collisions with existing tools).
 
-Presented at [Black Hat USA 2026 Arsenal](https://www.blackhat.com/us-26/arsenal/schedule/index.html).
+Presented at [Black Hat USA 2026 Arsenal](https://blackhat.com/us-26/arsenal/schedule/index.html#petriage-cross-platform-pe-surface-analysis-for-malware-triage-51977).
 
 ## Concept
 
