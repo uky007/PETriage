@@ -287,6 +287,17 @@ fn main() {
         }
     };
 
+    if file.is_dir() {
+        exit_error(
+            &format!(
+                "'{}' is a directory. Use --batch <DIR> to analyze every PE file inside it.",
+                file.display()
+            ),
+            json_mode,
+            1,
+        );
+    }
+
     let data = match fs::read(&file) {
         Ok(d) => d,
         Err(e) => {

@@ -3016,3 +3016,25 @@ fn carve_overlay_fails_without_overlay() {
     let _ = std::fs::remove_file(&input_path);
     let _ = std::fs::remove_file(&output_path);
 }
+
+#[test]
+fn directory_argument_points_at_batch_mode() {
+    let id = COUNTER.fetch_add(1, Ordering::SeqCst);
+    let pid = std::process::id();
+    let dir_path = std::env::temp_dir().join(format!("petriage_dirarg_{}_{}", pid, id));
+    std::fs::create_dir_all(&dir_path).unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_petriage"))
+        .arg(&dir_path)
+        .output()
+        .expect("failed to run petriage");
+
+    assert_eq!(output.status.code(), Some(1), "a directory argument should exit 1");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("--batch"),
+        "the error should point at --batch, got: {stderr}"
+    );
+
+    let _ = std::fs::remove_dir(&dir_path);
+}
