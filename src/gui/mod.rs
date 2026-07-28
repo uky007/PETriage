@@ -104,8 +104,15 @@ fn setup_style(ctx: &egui::Context) {
     // Striped table bg
     visuals.striped = true;
 
-    ctx.set_visuals(visuals);
-    ctx.set_style(style);
+    // Every panel paints its own dark background, so the dark palette has to win
+    // regardless of the OS light/dark setting. egui defaults to following the system
+    // theme, and on Windows in light mode it would pick its light style — gray-80 body
+    // text and black strong text — rendering near-invisible text on our dark panels.
+    // Installing the palette into both theme slots (and pinning the preference) keeps
+    // the appearance identical on Windows, Linux, and macOS.
+    style.visuals = visuals;
+    ctx.set_theme(egui::ThemePreference::Dark);
+    ctx.all_styles_mut(|s| *s = style.clone());
 }
 
 #[derive(Default)]
@@ -523,5 +530,59 @@ impl eframe::App for ReadpeApp {
                     }
                 }
             });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The panels paint their own dark backgrounds, so the dark palette must be used even
+    /// when the OS reports light mode. Before this was pinned, Windows in light mode picked
+    /// egui's light style and drew gray-80 body text and black strong text on those dark
+    /// panels — the Sections tab was effectively unreadable.
+    #[test]
+    fn dark_palette_survives_a_light_system_theme() {
+        let ctx = egui::Context::default();
+        setup_style(&ctx);
+
+        assert_eq!(
+            ctx.options(|opt| opt.theme_preference),
+            egui::ThemePreference::Dark,
+            "the theme preference should be pinned, not left following the OS"
+        );
+
+        // What egui resolves to when the OS reports light mode.
+        ctx.options_mut(|opt| opt.theme_preference = egui::ThemePreference::Light);
+
+        let visuals = ctx.style().visuals.clone();
+        assert_eq!(visuals.panel_fill, BG_DARK, "panel background must stay dark");
+        assert_eq!(
+            visuals.widgets.noninteractive.fg_stroke.color, TEXT_PRIMARY,
+            "body text must stay light on the dark panels"
+        );
+        assert_eq!(
+            visuals.widgets.active.fg_stroke.color,
+            Color32::WHITE,
+            "strong text (section names) must stay white, never black"
+        );
+    }
+
+    /// `setup_style` used to clone the style before customizing the visuals and then call
+    /// `set_style`, which overwrote the visuals it had just installed.
+    #[test]
+    fn custom_visuals_are_not_clobbered_by_the_style() {
+        let ctx = egui::Context::default();
+        setup_style(&ctx);
+
+        let style = ctx.style();
+        assert_eq!(style.visuals.hyperlink_color, ACCENT);
+        assert_eq!(style.visuals.selection.stroke.color, ACCENT);
+        assert!(style.visuals.striped, "table striping is part of the palette");
+        assert_eq!(
+            style.override_font_id,
+            Some(FontId::monospace(13.0)),
+            "the monospace override must survive too"
+        );
     }
 }
