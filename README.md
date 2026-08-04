@@ -77,7 +77,7 @@ See [docs/usage.md](docs/usage.md) for full CLI options, `jq` recipes, TUI/GUI d
 
 ## Key Features
 
-- **25 anomaly rules** -- Packing, code injection, timestamp manipulation, structural anomalies, OPSEC leaks, Rich Header tampering, Export Directory anomalies
+- **31 detection rules** -- 22 anomaly + 9 OPSEC rules covering packing, code injection, timestamp manipulation, structural anomalies, OPSEC leaks, Rich Header tampering, and Export Directory anomalies (full table: [docs/anomaly_rules.md](docs/anomaly_rules.md))
 - **OPSEC analysis** -- PDB paths, credential patterns, endpoint detection, CI/CD path hints, source path username leaks
 - **Build fingerprinting** -- .NET / Go / Rust / MSVC / MinGW detection with packer identification (UPX, Themida, VMProtect, NSIS, etc.)
 - **Overlay carve/strip** -- Extract overlay data or save PE without overlay (CLI and GUI)
